@@ -143,6 +143,12 @@ eq(fz.length, 5, 'ไม่มีบิลผีเกิดจากเลข�
 fiv('IV691100082', '2026-11-09', 'IV07691100999', 1234);
 eq(/ซ้ำกับบิล/.test(fbill('IV07691100999').review), true, 'เลขใบกำกับซ้ำกับบิลอื่น → รอตรวจ');
 }
+{
+  const dd = [];
+  T.applyDoc_(dd, { title: 'ใบส่งสินค้า', doc_type: 'delivery_note', doc_no: 'IV04691100102', doc_date: '2026-11-18', total: 29300, vat: 0 }, 'JSTAR', '');
+  T.applyDoc_(dd, { title: 'ใบส่งสินค้า/ใบกำกับภาษี', doc_type: 'tax_invoice', doc_no: 'IV691100195', doc_date: '2026-11-15', ref_no: 'IV04691100102', total: 29300, vat: 1 }, 'JSTAR', 'L');
+  eq(/อาจอ่านวันที่ผิด/.test(dd[0].review), true, 'วันที่ใบกำกับก่อนวันที่บิล → รอตรวจ');
+}
 
 console.log(fail ? '\n' + fail + ' รายการไม่ผ่าน' : '\nผ่านทั้งหมด');
 process.exit(fail ? 1 : 0);

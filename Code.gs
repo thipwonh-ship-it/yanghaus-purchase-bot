@@ -225,6 +225,8 @@ function applyDoc_(bills, doc, supplier, link) {
       if (twin) addNote_(b, 'เลขใบกำกับ ' + no + ' ซ้ำกับบิล ' + twin.no + ' อาจอ่านเลขผิด');
       if (!jstarNoOk_(no)) addNote_(b, 'เลขใบกำกับ ' + no + ' ไม่ครบหลัก อาจอ่านผิด');
       if (m.note) addNote_(b, m.note);
+      /* ใบกำกับลงวันที่ก่อนวันส่งของ = ปกติเป็นไปไม่ได้ → น่าจะอ่านวันที่ผิด (เคสจริง 19 พ.ย.: 18 อ่านเป็น 15) */
+      if (b.date && date && daysBetween_(b.date, date) < 0) addNote_(b, 'วันที่ใบกำกับ ' + dmy_(date) + ' ก่อนวันที่บิล ' + dmy_(b.date) + ' อาจอ่านวันที่ผิด');
       return (m.bill ? 'จับคู่บิล ' + b.no + (m.how ? ' (' + m.how + ')' : '') : 'ใบกำกับมาก่อนบิล ' + ref);
     }
     return 'เก็บไฟล์ (' + kind + ')';
