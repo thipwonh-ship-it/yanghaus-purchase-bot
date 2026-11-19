@@ -2,7 +2,8 @@
  * YH Purchase — บอทเก็บเอกสารซื้อจากกลุ่มไลน์ซัพพลายเออร์ + ทะเบียนบิล + รายการตามใบกำกับ
  * ผูกกับ Google Sheet "YANG Haus บัญชีซื้อ-ขาย 2026" (เขียนเฉพาะแท็บของบอท ไม่แตะแท็บ ซื้อ/ขาย/ค่าใช้จ่าย)
  *
- * บอทรับอย่างเดียว: ไม่ reply / ไม่ push เข้ากลุ่ม  (push ได้ที่เดียวคือแชท 1:1 ของคุณอ้อย วันตัดยอดรุ่งเรือง)
+ * ในกลุ่ม: บอทไม่ push เด็ดขาด · reply ได้เฉพาะกลุ่มที่ตั้ง "ตอบรับในแชท" (แจ้งว่าเก็บใบกำกับ/ใบเสร็จเลขอะไรแล้ว)
+ * push ได้เฉพาะแชท 1:1: แจ้งเตือนคนที่ติ๊ก "รับแจ้งเตือน" และร่างสรุปยอดรุ่งเรืองให้คุณอ้อย
  *
  * Deploy: Apps Script → Deploy → New deployment → Web app · Execute as: Me · Who has access: Anyone
  * Webhook URL ที่ใส่ใน LINE Developers = <URL ของ web app>?k=<WEBHOOK_KEY>
@@ -71,6 +72,17 @@ function daysBetween_(a, b) { return Math.round((ymdToUtc_(b) - ymdToUtc_(a)) / 
 function lastDay_(ymd) { const m = /^(\d{4})-(\d{2})/.exec(ymd); return new Date(Date.UTC(+m[1], +m[2], 0)).getUTCDate(); }
 function dow_(ymd) { return new Date(ymdToUtc_(ymd)).getUTCDay(); }           // 0 = อาทิตย์, 1 = จันทร์
 function ym_(ymd) { return String(ymd || '').slice(0, 7); }
+/* วันที่จาก AI → YYYY-MM-DD ค.ศ. เสมอ: รับ 2569-11-18 (ลืมแปลง พ.ศ.), 18/11/2569, 18/11/69 · อ่านไม่ออก = '' */
+function normDate_(s) {
+  const t = String(s == null ? '' : s).trim();
+  let y, m, d, x;
+  if ((x = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(t))) { y = +x[1]; m = +x[2]; d = +x[3]; }
+  else if ((x = /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/.exec(t))) { d = +x[1]; m = +x[2]; y = +x[3]; if (y < 100) y += 2500; }
+  else return '';
+  if (y > 2400) y -= 543;
+  if (y < 2000 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return '';
+  return y + '-' + ('0' + m).slice(-2) + '-' + ('0' + d).slice(-2);
+}
 function addNote_(bill, note) {
   const cur = String(bill.review || '');
   if (cur.indexOf(note) < 0) bill.review = cur ? cur + ' · ' + note : note;
@@ -93,6 +105,7 @@ function docKind_(doc) {
   if (/กำกับ|TAX\s*INVOICE/i.test(title) && num_(doc.vat) > 0) return 'tax_invoice';
   if (doc.doc_type === 'tax_invoice' && num_(doc.vat) <= 0 && /ส่งสินค้า|ส่งของ/.test(title)) return 'delivery_note';
   /* ชุดเอกสาร ป.รุ่งโรจน์: 4 ใบเลขเดียวกัน มี VAT ทุกใบ ต่างกันแค่หัว → ยึดหัวเอกสาร ไม่ให้ใบเสร็จ/ใบแจ้งหนี้ถูกนับเป็นใบกำกับ */
+  if (doc.doc_type === 'transfer_slip' || doc.doc_type === 'platform_order') return doc.doc_type;   // สลิป/ใบปะหน้า: ไม่ตีความจากคำในหัว
   if (/ใบเสร็จ/.test(title)) return 'receipt';
   if (/ส่งสินค้า|ส่งของ|แจ้งหนี้/.test(title)) return 'delivery_note';
   return String(doc.doc_type || 'other');
@@ -180,6 +193,16 @@ function applyDoc_(bills, doc, supplier, link) {
   const date = doc.doc_date || '';
   const total = num_(doc.total);
   const lines = Array.isArray(doc.lines) ? doc.lines : [];
+  /* สลิปที่อ่านเลขอ้างอิงไม่ได้: ใช้วันที่+ยอดแทน (ไม่ใช้คำว่า slip เฉย ๆ เพราะสลิปใบที่สองจะถูกมองว่าซ้ำ) */
+  const payRef = no || ('สลิป ' + date + ' ' + total);
+
+  /* ใบกำกับที่อ่านเลขที่ไม่ได้: ห้ามปล่อยให้เลขว่างไปจับคู่กับบิลใด ๆ → ตั้งเป็นรายการรอตรวจแยก */
+  if (kind === 'tax_invoice' && !no) {
+    const b = getBill_(bills, supplier + '|NOINV|' + date + '|' + total, supplier);
+    b.no = '(อ่านเลขใบกำกับไม่ได้)'; b.date = date; b.amount = total; b.invDate = date; b.invAmount = total; b.invLink = link || b.invLink;
+    addNote_(b, 'อ่านเลขใบกำกับไม่ได้ เปิดไฟล์ดูแล้วแก้เลขในชีท');
+    return 'รอตรวจ: อ่านเลขใบกำกับไม่ได้';
+  }
 
   if (supplier === 'JSTAR') {
     const cc = String(doc.customer_code || '').toUpperCase().replace(/\s/g, '');
@@ -249,12 +272,15 @@ function applyDoc_(bills, doc, supplier, link) {
       return 'บิล ' + no;
     }
     if (kind === 'transfer_slip') {
-      const open = bills.filter(function (b) { return b.supplier === 'PRR' && !num_(b.paid) && sameAmt_(b.amount, total); });
+      /* สลิปใบเดิมถูกอ่านซ้ำ (เช่นรอบก่อนเขียนชีทไม่จบ): ห้ามนับจ่ายสองครั้ง */
+      const already = bills.filter(function (b) { return b.supplier === 'PRR' && String(b.payRef || '').split(', ').indexOf(payRef) >= 0; })[0];
+      if (already) return 'ซ้ำ: สลิปนี้นับแล้ว → ' + already.no;
+      const open = bills.filter(function (b) { return b.supplier === 'PRR' && b.key.indexOf('|NOINV|') < 0 && !num_(b.paid) && sameAmt_(b.amount, total); });
       open.sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
       const b = open[0] || getBill_(bills, 'PRR|SLIP|' + (no || date + '|' + total), 'PRR');
       b._dirty = true;
       if (!open[0]) { b.no = '(ไม่มีใบเสนอราคา)'; b.date = date; b.amount = total; }
-      addPayment_(b, no || 'slip', date, total);
+      addPayment_(b, payRef, date, total);
       return 'จ่าย ' + fmtMoney_(total) + ' → ' + b.no;
     }
     if (kind === 'tax_invoice') {
@@ -279,7 +305,7 @@ function applyDoc_(bills, doc, supplier, link) {
     if (kind === 'transfer_slip') {
       const b = getBill_(bills, 'RRL|' + ym_(date), 'RRL');
       b.no = 'ยอดเดือน ' + ym_(date); b.date = b.date || date; b.amount = b.amount || total;
-      addPayment_(b, no || 'slip', date, total);
+      addPayment_(b, payRef, date, total);
       return 'จ่ายรุ่งเรือง ' + fmtMoney_(total);
     }
     if (kind === 'tax_invoice') {
@@ -530,11 +556,19 @@ function handleEvent_(ss, cfg, ev, acks) {
   }
   /* คอลัมน์ 20 = โหมด|เวลารับ(ms)|replyToken — เก็บชั่วคราวให้ ackCollect_ รวมตอบทีเดียว แล้วล้างทิ้ง */
   const pend = src.ack && ev.replyToken ? src.ack + '|' + Date.now() + '|' + ev.replyToken : '';
-  const qRow = withLock_(function () {
-    const r = nextRow_(q);
-    q.getRange(r, 1, 1, 20).setValues([[when, src.name, src.supplier, sender, m.type, String(m.id), fileId, status, '', '', '', '', '', '', '', '', '', 0, err, pend]]);
-    return r;
-  });
+  let qRow = 0;
+  try {
+    qRow = withLock_(function () {
+      const r = nextRow_(q);
+      q.getRange(r, 1, 1, 20).setValues([[when, src.name, src.supplier, sender, m.type, String(m.id), fileId, status, '', '', '', '', '', '', '', '', '', 0, err, pend]]);
+      return r;
+    });
+  } catch (e3) {
+    /* เซฟไฟล์ได้แต่ลงคิวไม่ได้ (ชีทไม่ว่าง/ล็อกหมดเวลา): ไฟล์จะค้างใน inbox โดยไม่มีใครอ่าน → ต้องแจ้งคน */
+    console.error('queue ' + e3);
+    alertAdmins_(ss, '⚠️ รับไฟล์จาก ' + (src.name || '-') + ' แล้วแต่ลงคิวไม่ได้ เมื่อ ' + when.slice(5, 16) + (fileId ? '\nไฟล์: https://drive.google.com/file/d/' + fileId + '/view\nให้ส่งไฟล์นี้เข้ากลุ่มใหม่อีกครั้ง' : ''), 'q_' + sourceId_(ev));
+    return;
+  }
   if (pend && acks) acks.push(qRow);
 }
 
@@ -782,7 +816,7 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
   const seen = {};                                             // กันเอกสารซ้ำ: ซัพพลายเออร์ + ชนิด + เลขที่
   for (let i = 1; i < v.length; i++) {
     if (v[i][7] !== 'DONE' || !v[i][10] || /^ซ้ำ/.test(v[i][15])) continue;
-    seen[v[i][2] + '|' + v[i][8] + '|' + v[i][10]] = { copy: /สำเนา/.test(v[i][15]), link: v[i][16], plan: null };
+    seen[v[i][2] + '|' + v[i][8] + '|' + v[i][10]] = { copy: /สำเนา/.test(v[i][15]), link: v[i][16], plan: null, total: v[i][13] === '' ? null : num_(v[i][13]) };
   }
 
   /* ขั้น A — อ่าน: หลายใบอ่านพร้อมกันก่อน ใบที่ไม่สำเร็จค่อยอ่านเดี่ยว แล้วจับคู่ในหน่วยความจำ (ยังไม่แตะ Drive/ชีท) */
@@ -796,12 +830,20 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
       const file = files[k] || DriveApp.getFileById(v[i][6]);
       const doc = pre[k] || readDoc_(file) || {};
       if (!doc.is_document) { plan.push({ row: row, file: file, skip: true }); out[row] = { status: 'SKIP' }; return; }
+      doc.doc_date = normDate_(doc.doc_date);
+      if (Array.isArray(doc.lines)) doc.lines.forEach(function (l) { if (l) l.doc_date = normDate_(l.doc_date); });
+      /* วันที่อนาคต (เกินวันรับ 1 วัน) = อ่านผิดแน่ → ไม่ใช้จัดโฟลเดอร์/จับคู่ */
+      const recv = String(v[i][0]).slice(0, 10);
+      const badDate = !!(doc.doc_date && recv && daysBetween_(recv, doc.doc_date) > 1);
+      if (badDate) doc.doc_date = '';
       let supplier = String(v[i][2] || '').toUpperCase();
       if (!SUPPLIERS[supplier] || supplier === 'OTHER') supplier = detectSupplier_(doc);   // AUTO (แชท 1:1) → ดูจากผู้ขาย/ผู้รับโอน
       const kind = docKind_(doc);
       const no = normDocNo_(doc.doc_no);
       const dupKey = supplier + '|' + kind + '|' + no;
-      const prev = no ? seen[dupKey] : null;
+      /* ซ้ำ = เลขที่เดิม + ยอดเท่าเดิม เท่านั้น — เลขเดิมแต่ยอดต่าง แปลว่า AI อ่านเลขผิดจนไปชนกับอีกใบ ห้ามทิ้งไฟล์ ให้ลงทะเบียนแล้วขึ้นรอตรวจ */
+      const hit = no ? seen[dupKey] : null;
+      const prev = hit && (hit.total === null || sameAmt_(hit.total, doc.total)) ? hit : null;
       const copy = kind === 'tax_invoice' && isCopy_(doc);
       const upgrade = !!(prev && prev.copy && kind === 'tax_invoice' && !copy);   // เคยได้แค่สำเนา แล้วต้นฉบับตามมา → ใช้ต้นฉบับแทน
       const isDup = !!(prev && !upgrade);
@@ -820,10 +862,12 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
         if (copy) { result += ' · สำเนา'; bills.forEach(function (b) { if (b.supplier === supplier && b.invNo === no) { addNote_(b, COPY_NOTE); b._dirty = true; } }); }
       }
       const pl = { row: row, file: file, doc: doc, supplier: supplier, kind: kind, no: no, isDup: isDup, link: link, result: result, tries: tries, received: v[i][0] };
-      if (no && !isDup) seen[dupKey] = { copy: copy, link: link, plan: pl };
+      if (no && !isDup) seen[dupKey] = { copy: copy, link: link, plan: pl, total: num_(doc.total) };
+      if (hit && !prev) { result += ' · เลขซ้ำกับเอกสารอื่นแต่ยอดต่าง ตรวจเลข'; pl.result = result; }
+      if (badDate) { result += ' · วันที่อ่านได้เป็นอนาคต ตรวจวันที่'; pl.result = result; }
       plan.push(pl);
       /* quiet = เก็บเงียบ ๆ ไม่ตอบในกลุ่ม: ใบเสร็จของ ป.รุ่งโรจน์ มากับชุดใบกำกับเลขเดียวกันเสมอ (Thipwon 19 พ.ย.) */
-      out[row] = { status: 'DONE', kind: kind, supplierName: SUPPLIERS[supplier].name, no: no, total: num_(doc.total), result: result, quiet: supplier === 'PRR' && kind === 'receipt' };
+      out[row] = { status: 'DONE', kind: kind, supplierName: SUPPLIERS[supplier].name, no: no, total: num_(doc.total), result: result, quiet: (supplier === 'PRR' && kind === 'receipt') || /^ข้าม/.test(result) };
     } catch (err) {
       /* เพดาน Gemini เต็ม/ระบบไม่ว่าง (429, 503): ไม่นับเป็นความผิดพลาดของเอกสาร ลองใหม่รอบถัดไปได้เรื่อย ๆ */
       const busy = /Gemini (429|503)/.test(String(err));
@@ -844,7 +888,11 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
       q.getRange(p.row, 3).setValue(p.supplier);
       q.getRange(p.row, 8, 1, 12).setValues([['DONE', p.kind, p.doc.seller || p.doc.payee || '', p.no, p.doc.doc_date || '', normDocNo_(p.doc.ref_no),
         num_(p.doc.total) || '', num_(p.doc.vat) || '', p.result, p.link, p.tries, '']]);
-    } catch (err) { console.error('store row ' + p.row + ' ' + err); }
+    } catch (err) {
+      /* เก็บไม่สำเร็จ (ย้ายไฟล์/เขียนชีทพลาด): นับเป็น 1 ครั้ง กันวนอ่านซ้ำไม่จบ */
+      console.error('store row ' + p.row + ' ' + err);
+      try { if (p.row && p.tries) { q.getRange(p.row, 8).setValue(p.tries >= MAX_TRIES ? 'ERR' : 'NEW'); q.getRange(p.row, 18, 1, 2).setValues([[p.tries, 'เก็บไม่สำเร็จ: ' + String(err).slice(0, 160)]]); if (p.tries >= MAX_TRIES) { p.err = String(err); p.fileId = p.file ? p.file.getId() : ''; p.source = ''; } } } catch (e2) {}
+    }
   });
   writeBills_(ss, bills);
 
@@ -909,7 +957,8 @@ function draftRrlSummary_(ss, today) {
     'List ONLY items the buyer actually ordered AND that were confirmed delivered or picked up (e.g. supplier says จัดส่งเรียบร้อย, buyer says รับแล้ว/ไปรับ). ' +
     'Ignore stock questions (มีไหม), items answered ไม่มี/หมด, and cancelled items. ' +
     'Return ONLY JSON: {"lines":["D/M/YY ยี่ห้อ ขนาด จำนวน", ...], "unsure":["short Thai note about anything ambiguous", ...]} ' +
-    'using Thai Buddhist 2-digit year (2026 → 69), e.g. "6/11/69 ฟอเท็ก 265/60-18 4เส้น". Keep product wording as the buyer wrote it.\n\n' + lines.join('\n');
+    'using Thai Buddhist 2-digit year (2026 → 69), e.g. "6/11/69 ฟอเท็ก 265/60-18 4เส้น". Keep product wording as the buyer wrote it. ' +
+    'On ORDER-SHEET lines the printed quantity counts listing units: for wheels 1 = 1 วง, unless the product name or option says it is a set (e.g. ชุด 4 วง, 4 ชิ้น, set of 4) — then write the real piece count (sets × pieces per set).\n\n' + lines.join('\n');
   const d = geminiJson_([{ text: prompt }]);
   const mm = +today.slice(5, 7);
   let out = 'ยอดเดือน ' + mm + '\n' + (d.lines || []).join('\n');

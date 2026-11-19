@@ -3,7 +3,7 @@ const fs = require('fs'), vm = require('vm'), path = require('path');
 const code = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
 const ctx = { console };
 vm.createContext(ctx);
-vm.runInContext(code + '\nthis.T={normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_,ackSummary_,ackMode_,editDist_,docKind_,isCopy_};', ctx);
+vm.runInContext(code + '\nthis.T={normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_,ackSummary_,ackMode_,editDist_,docKind_,isCopy_,normDate_};', ctx);
 const T = ctx.T;
 let fail = 0;
 const eq = (a, b, m) => { const ok = JSON.stringify(a) === JSON.stringify(b); if (!ok) { fail++; console.log('FAIL', m, '\n  got ', JSON.stringify(a), '\n  want', JSON.stringify(b)); } else console.log('ok  ', m); };
@@ -160,6 +160,25 @@ eq(/ซ้ำกับบิล/.test(fbill('IV07691100999').review), true, 'เ
   eq(T.ackSummary_([it('tax_invoice', 'ซ้ำ: มีต้นฉบับแล้ว'), it('tax_invoice', 'ได้ต้นฉบับแล้ว (แทนใบเดิม)'), it('receipt', 'เก็บไฟล์ (receipt)', true), it('delivery_note', 'เก็บไฟล์')], 'key'),
     '✅ เก็บใบกำกับภาษีแล้ว: IV6910-00044\n🙏 ยางเฮ้าส์ ขอบคุณค่ะ', 'ป.รุ่งโรจน์ ชุด 4 ไฟล์ → ตอบบรรทัดเดียว');
   eq(T.ackSummary_([it('tax_invoice', 'ใบกำกับใหม่ IV6910-00044 · สำเนา')], 'key'), '✅ เก็บใบกำกับภาษีแล้ว: IV6910-00044 (สำเนา)\n🙏 ยางเฮ้าส์ ขอบคุณค่ะ', 'ได้แค่สำเนา');
+}
+
+/* ตรวจโค้ดรอบ 19 พ.ย. ค่ำ */
+eq([T.normDate_('2026-11-18'), T.normDate_('2569-11-18'), T.normDate_('18/11/2569'), T.normDate_('18/11/69'), T.normDate_('2026-13-40'), T.normDate_(''), T.normDate_('abc')],
+  ['2026-11-18', '2026-11-18', '2026-11-18', '2026-11-18', '', '', ''], 'วันที่: แปลง พ.ศ./รูปแบบไทย · อ่านไม่ออก = ว่าง');
+eq(T.docKind_({ title: 'ใบเสร็จรับเงิน e-slip', doc_type: 'transfer_slip', vat: 0 }), 'transfer_slip', 'สลิปที่หัวมีคำว่าใบเสร็จ ยังเป็นสลิป');
+{
+  const bb = [];
+  T.applyDoc_(bb, { title: 'ใบเสนอราคา', doc_type: 'quotation', doc_no: 'QT1', doc_date: '2026-11-10', total: 5000, vat: 0 }, 'PRR', '');
+  const r1 = T.applyDoc_(bb, { title: 'ใบกำกับภาษี', doc_type: 'tax_invoice', doc_no: '', doc_date: '2026-11-11', total: 5000, vat: 327.1 }, 'PRR', 'L');
+  eq([/อ่านเลขใบกำกับไม่ได้/.test(r1), bb.length, bb[0].invNo, /อ่านเลขใบกำกับไม่ได้/.test(bb[1].review)], [true, 2, '', true], 'ใบกำกับอ่านเลขไม่ได้ → ไม่จับคู่กับบิลอื่น ขึ้นรอตรวจแยก');
+  const slip = { title: 'โอนเงินสำเร็จ', doc_type: 'transfer_slip', doc_no: 'REF9', doc_date: '2026-11-10', total: 5000, vat: 0 };
+  T.applyDoc_(bb, slip, 'PRR', '');
+  const r2 = T.applyDoc_(bb, slip, 'PRR', '');
+  eq([bb[0].paid, /^ซ้ำ/.test(r2), bb.length], [5000, true, 2], 'ป.รุ่งโรจน์: สลิปเดิมอ่านซ้ำ ไม่นับจ่ายสองครั้ง ไม่เกิดบิลใหม่');
+  const rr = [];
+  T.applyDoc_(rr, { title: 'โอนเงินสำเร็จ', doc_type: 'transfer_slip', doc_no: '', doc_date: '2026-11-27', total: 1000, vat: 0 }, 'RRL', '');
+  T.applyDoc_(rr, { title: 'โอนเงินสำเร็จ', doc_type: 'transfer_slip', doc_no: '', doc_date: '2026-11-28', total: 2000, vat: 0 }, 'RRL', '');
+  eq(rr[0].paid, 3000, 'รุ่งเรือง: สลิป 2 ใบที่อ่านเลขอ้างอิงไม่ได้ นับครบทั้งสองใบ');
 }
 
 console.log(fail ? '\n' + fail + ' รายการไม่ผ่าน' : '\nผ่านทั้งหมด');
