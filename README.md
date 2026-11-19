@@ -105,3 +105,9 @@
 - Apps Script: โปรเจกต์ "YH Purchase Bot" (thipwon.h@gmail.com) https://script.google.com/home/projects/1b1OpyxUlVBm8ovmwRWMJAdGPWlkVbleQukQPsgXJXcZRGwrxQhrKOA2x/edit
 - แก้โค้ดแล้วต้อง Deploy → Manage deployments → ✏️ → Version: New version (URL เดิม)
 - บอทตอบ webhook ด้วย HtmlService (ContentService ทำให้ LINE ได้ 302)
+
+## ชุดเอกสาร ป.รุ่งโรจน์ (PDF 4 ไฟล์ เลขเดียวกัน)
+- ต้นฉบับใบกำกับภาษี → `ภาษีซื้อ` + ลงทะเบียน + ตอบรับในกลุ่ม
+- สำเนาใบกำกับภาษี → ทิ้งถ้ามีต้นฉบับ · ถ้ามาแค่สำเนา เก็บไว้ก่อน ขึ้น "รอตรวจ: ได้แค่สำเนาใบกำกับ รอต้นฉบับ" พอต้นฉบับมาจะแทนให้เอง
+- ใบเสร็จรับเงิน, ใบส่งสินค้า/ใบแจ้งหนี้ → เก็บเงียบ ๆ ใน `เอกสารซื้อ/ป.รุ่งโรจน์` ไม่ตอบในกลุ่ม
+- ชนิดเอกสารยึดจากหัวกระดาษ (ทุกใบในชุดมี VAT เหมือนกัน)

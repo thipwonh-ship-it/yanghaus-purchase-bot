@@ -3,7 +3,7 @@ const fs = require('fs'), vm = require('vm'), path = require('path');
 const code = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
 const ctx = { console };
 vm.createContext(ctx);
-vm.runInContext(code + '\nthis.T={normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_,ackSummary_,ackMode_,editDist_};', ctx);
+vm.runInContext(code + '\nthis.T={normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_,ackSummary_,ackMode_,editDist_,docKind_,isCopy_};', ctx);
 const T = ctx.T;
 let fail = 0;
 const eq = (a, b, m) => { const ok = JSON.stringify(a) === JSON.stringify(b); if (!ok) { fail++; console.log('FAIL', m, '\n  got ', JSON.stringify(a), '\n  want', JSON.stringify(b)); } else console.log('ok  ', m); };
@@ -148,6 +148,18 @@ eq(/ซ้ำกับบิล/.test(fbill('IV07691100999').review), true, 'เ
   T.applyDoc_(dd, { title: 'ใบส่งสินค้า', doc_type: 'delivery_note', doc_no: 'IV04691100102', doc_date: '2026-11-18', total: 29300, vat: 0 }, 'JSTAR', '');
   T.applyDoc_(dd, { title: 'ใบส่งสินค้า/ใบกำกับภาษี', doc_type: 'tax_invoice', doc_no: 'IV691100195', doc_date: '2026-11-15', ref_no: 'IV04691100102', total: 29300, vat: 1 }, 'JSTAR', 'L');
   eq(/อาจอ่านวันที่ผิด/.test(dd[0].review), true, 'วันที่ใบกำกับก่อนวันที่บิล → รอตรวจ');
+}
+
+/* ชุดเอกสาร ป.รุ่งโรจน์ (4 PDF เลขเดียวกัน มี VAT ทุกใบ) */
+{
+  const set = t => ({ title: t, doc_type: 'tax_invoice', doc_no: 'IV6910-00044', doc_date: '2026-10-26', total: 31600, vat: 2067.29 });
+  eq([T.docKind_(set('ต้นฉบับใบกำกับภาษี')), T.docKind_(set('สำเนาใบกำกับภาษี')), T.docKind_(set('ใบเสร็จรับเงิน')), T.docKind_(set('ใบส่งสินค้า/ใบแจ้งหนี้')), T.docKind_(set('ใบเสร็จรับเงิน/ใบกำกับภาษี'))],
+    ['tax_invoice', 'tax_invoice', 'receipt', 'delivery_note', 'tax_invoice'], 'ป.รุ่งโรจน์: แยกชนิดจากหัวเอกสาร');
+  eq([T.isCopy_(set('สำเนาใบกำกับภาษี')), T.isCopy_(set('ต้นฉบับใบกำกับภาษี')), T.isCopy_(set('ใบกำกับภาษี'))], [true, false, false], 'สำเนา/ต้นฉบับ');
+  const it = (kind, result, quiet) => ({ status: 'DONE', kind, no: 'IV6910-00044', result, quiet });
+  eq(T.ackSummary_([it('tax_invoice', 'ซ้ำ: มีต้นฉบับแล้ว'), it('tax_invoice', 'ได้ต้นฉบับแล้ว (แทนใบเดิม)'), it('receipt', 'เก็บไฟล์ (receipt)', true), it('delivery_note', 'เก็บไฟล์')], 'key'),
+    '✅ เก็บใบกำกับภาษีแล้ว: IV6910-00044\n🙏 ยางเฮ้าส์ ขอบคุณค่ะ', 'ป.รุ่งโรจน์ ชุด 4 ไฟล์ → ตอบบรรทัดเดียว');
+  eq(T.ackSummary_([it('tax_invoice', 'ใบกำกับใหม่ IV6910-00044 · สำเนา')], 'key'), '✅ เก็บใบกำกับภาษีแล้ว: IV6910-00044 (สำเนา)\n🙏 ยางเฮ้าส์ ขอบคุณค่ะ', 'ได้แค่สำเนา');
 }
 
 console.log(fail ? '\n' + fail + ' รายการไม่ผ่าน' : '\nผ่านทั้งหมด');

@@ -92,7 +92,16 @@ function docKind_(doc) {
   const title = String(doc.title || '');
   if (/กำกับ|TAX\s*INVOICE/i.test(title) && num_(doc.vat) > 0) return 'tax_invoice';
   if (doc.doc_type === 'tax_invoice' && num_(doc.vat) <= 0 && /ส่งสินค้า|ส่งของ/.test(title)) return 'delivery_note';
+  /* ชุดเอกสาร ป.รุ่งโรจน์: 4 ใบเลขเดียวกัน มี VAT ทุกใบ ต่างกันแค่หัว → ยึดหัวเอกสาร ไม่ให้ใบเสร็จ/ใบแจ้งหนี้ถูกนับเป็นใบกำกับ */
+  if (/ใบเสร็จ/.test(title)) return 'receipt';
+  if (/ส่งสินค้า|ส่งของ|แจ้งหนี้/.test(title)) return 'delivery_note';
   return String(doc.doc_type || 'other');
+}
+/* หัวเอกสารเขียนว่า "สำเนา" และไม่มีคำว่า "ต้นฉบับ" */
+function isCopy_(doc) { const t = String(doc.title || ''); return /สำเนา/.test(t) && !/ต้นฉบับ/.test(t); }
+const COPY_NOTE = 'ได้แค่สำเนาใบกำกับ รอต้นฉบับ';
+function dropNote_(bill, note) {
+  bill.review = String(bill.review || '').split(' · ').filter(function (x) { return x && x !== note; }).join(' · ');
 }
 
 function newBill_(key, supplier) {
@@ -383,8 +392,15 @@ function ackSummary_(items, mode) {
   if (mode === 'all') done.forEach(function (r) { if (kinds.indexOf(r.kind) < 0) kinds.push(r.kind); });
   const lines = [];
   kinds.forEach(function (k) {
-    const nos = done.filter(function (r) { return r.kind === k; })
-      .map(function (r) { return (r.no || '(ไม่มีเลขที่)') + (/^ซ้ำ/.test(r.result || '') ? ' (ซ้ำ)' : ''); });
+    /* เลขเดียวกันหลายไฟล์ (ต้นฉบับ + สำเนา) แสดงครั้งเดียว: ไม่มีวงเล็บถ้ามีใบที่เก็บจริง · (สำเนา) ถ้าได้แค่สำเนา · (ซ้ำ) ถ้าซ้ำทั้งหมด */
+    const tag = {}, order = [];
+    done.forEach(function (r) {
+      if (r.kind !== k || (r.quiet && mode !== 'all')) return;
+      const no = r.no || '(ไม่มีเลขที่)', res = String(r.result || '');
+      const t = /^ซ้ำ/.test(res) ? 2 : (/สำเนา/.test(res) ? 1 : 0);
+      if (!(no in tag)) { tag[no] = t; order.push(no); } else tag[no] = Math.min(tag[no], t);
+    });
+    const nos = order.map(function (no) { return no + (tag[no] === 2 ? ' (ซ้ำ)' : tag[no] === 1 ? ' (สำเนา)' : ''); });
     if (nos.length) lines.push('✅ เก็บ' + (KIND_TAG[k] || 'เอกสาร') + 'แล้ว' + (nos.length > 1 ? ' ' + nos.length + ' ใบ' : '') + ': ' + nos.join(', '));
   });
   const skip = items.filter(function (r) { return r.status === 'SKIP'; }).length;
@@ -763,7 +779,10 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
   if (!todo.length) { if (afterRead) afterRead(out); return out; }
   const bills = readBills_(ss);
   const seen = {};                                             // กันเอกสารซ้ำ: ซัพพลายเออร์ + ชนิด + เลขที่
-  for (let i = 1; i < v.length; i++) if (v[i][7] === 'DONE' && v[i][10]) seen[v[i][2] + '|' + v[i][8] + '|' + v[i][10]] = true;
+  for (let i = 1; i < v.length; i++) {
+    if (v[i][7] !== 'DONE' || !v[i][10] || /^ซ้ำ/.test(v[i][15])) continue;
+    seen[v[i][2] + '|' + v[i][8] + '|' + v[i][10]] = { copy: /สำเนา/.test(v[i][15]), link: v[i][16], plan: null };
+  }
 
   /* ขั้น A — อ่าน: หลายใบอ่านพร้อมกันก่อน ใบที่ไม่สำเร็จค่อยอ่านเดี่ยว แล้วจับคู่ในหน่วยความจำ (ยังไม่แตะ Drive/ชีท) */
   const files = todo.map(function (i) { try { return DriveApp.getFileById(v[i][6]); } catch (e) { return null; } });
@@ -781,12 +800,27 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
       const kind = docKind_(doc);
       const no = normDocNo_(doc.doc_no);
       const dupKey = supplier + '|' + kind + '|' + no;
-      const isDup = !!(no && seen[dupKey]);
+      const prev = no ? seen[dupKey] : null;
+      const copy = kind === 'tax_invoice' && isCopy_(doc);
+      const upgrade = !!(prev && prev.copy && kind === 'tax_invoice' && !copy);   // เคยได้แค่สำเนา แล้วต้นฉบับตามมา → ใช้ต้นฉบับแทน
+      const isDup = !!(prev && !upgrade);
       const link = isDup ? '' : file.getUrl();                     // ลิงก์ไฟล์ไม่เปลี่ยนเมื่อย้าย/เปลี่ยนชื่อ
-      const result = isDup ? 'ซ้ำ: เคยลงแล้ว' : applyDoc_(bills, doc, supplier, link);
-      seen[dupKey] = true;
-      plan.push({ row: row, file: file, doc: doc, supplier: supplier, kind: kind, no: no, isDup: isDup, link: link, result: result, tries: tries, received: v[i][0] });
-      out[row] = { status: 'DONE', kind: kind, supplierName: SUPPLIERS[supplier].name, no: no, total: num_(doc.total), result: result };
+      let result;
+      if (isDup) result = 'ซ้ำ: เคยลงแล้ว';
+      else if (upgrade) {
+        result = 'ได้ต้นฉบับแล้ว (แทนใบเดิม)';
+        bills.forEach(function (b) { if (b.supplier === supplier && b.invNo === no) { b.invLink = link; dropNote_(b, COPY_NOTE); b._dirty = true; } });
+        if (prev.plan) { prev.plan.isDup = true; prev.plan.link = ''; prev.plan.result = 'ซ้ำ: มีต้นฉบับแล้ว'; out[prev.plan.row].result = prev.plan.result; }
+        else if (prev.link) plan.push({ trashLink: prev.link });
+      } else {
+        result = applyDoc_(bills, doc, supplier, link);
+        if (copy) { result += ' · สำเนา'; bills.forEach(function (b) { if (b.supplier === supplier && b.invNo === no) { addNote_(b, COPY_NOTE); b._dirty = true; } }); }
+      }
+      const pl = { row: row, file: file, doc: doc, supplier: supplier, kind: kind, no: no, isDup: isDup, link: link, result: result, tries: tries, received: v[i][0] };
+      if (no && !isDup) seen[dupKey] = { copy: copy, link: link, plan: pl };
+      plan.push(pl);
+      /* quiet = เก็บเงียบ ๆ ไม่ตอบในกลุ่ม: ใบเสร็จของ ป.รุ่งโรจน์ มากับชุดใบกำกับเลขเดียวกันเสมอ (Thipwon 19 พ.ย.) */
+      out[row] = { status: 'DONE', kind: kind, supplierName: SUPPLIERS[supplier].name, no: no, total: num_(doc.total), result: result, quiet: supplier === 'PRR' && kind === 'receipt' };
     } catch (err) {
       /* เพดาน Gemini เต็ม/ระบบไม่ว่าง (429, 503): ไม่นับเป็นความผิดพลาดของเอกสาร ลองใหม่รอบถัดไปได้เรื่อย ๆ */
       const busy = /Gemini (429|503)/.test(String(err));
@@ -799,6 +833,7 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
   /* ขั้น B — เก็บ: ย้ายไฟล์เข้าโฟลเดอร์เดือน เขียนคิว เขียนทะเบียน (ถ้าล่มกลางทาง แถวยังเป็น NEW รอบถัดไปทำซ้ำได้) */
   plan.forEach(function (p) {
     try {
+      if (p.trashLink) { const m = /\/d\/([^/]+)/.exec(p.trashLink); if (m) DriveApp.getFileById(m[1]).setTrashed(true); return; }   // สำเนาที่ถูกแทนด้วยต้นฉบับ
       if (p.err) { q.getRange(p.row, 8).setValue(p.tries >= MAX_TRIES ? 'ERR' : 'NEW'); q.getRange(p.row, 18, 1, 2).setValues([[p.tries, p.err]]); return; }
       if (p.skip) { p.file.setTrashed(true); q.getRange(p.row, 8, 1, 2).setValues([['SKIP', 'ไม่ใช่เอกสาร']]); return; }
       /* เอกสารซ้ำ (เลขที่เดิม ชนิดเดิม ซัพพลายเออร์เดิม): ไม่เก็บไฟล์ซ้ำใน Drive ทิ้งลงถังขยะ */
