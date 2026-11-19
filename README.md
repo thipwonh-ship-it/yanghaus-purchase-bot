@@ -21,6 +21,7 @@
 
 ### แท็บในชีท (สร้างเองตอนรัน `setup`)
 - **บอท-ตั้งค่า** — 1 แถวต่อกลุ่ม/คน บอทเพิ่มแถวให้เองเมื่อถูกเชิญเข้ากลุ่มหรือมีคนทัก **ต้องเลือกซัพพลายเออร์และติ๊ก "เปิดใช้" เอง** ถึงจะเริ่มเก็บ
+  - คอลัมน์ **ตอบรับในแชท** (ติ๊ก = บอทตอบในแชทนั้นว่าเก็บเอกสารอะไร เลขที่ ยอดเท่าไร ด้วย reply ซึ่งไม่นับโควต้า) — ใช้กับกลุ่มของเราเอง/แชท 1:1 เท่านั้น **กลุ่มซัพพลายเออร์ห้ามติ๊ก** บอทต้องเงียบ
 - **บอท-คิว** — 1 แถวต่อไฟล์ที่รับมา: สถานะ `NEW` → `DONE` / `SKIP` (ไม่ใช่เอกสาร) / `ERR` (อ่านไม่ได้ 3 ครั้ง) พร้อมผลจับคู่และลิงก์ไฟล์
 - **บอท-ข้อความ** — ข้อความในกลุ่ม (ตามที่ตั้งในคอลัมน์ "เก็บข้อความ")
 - **ทะเบียนบิลซื้อ** — 1 แถวต่อบิล: ยอด จ่ายแล้วหรือยัง เลข/วันที่ใบกำกับ ได้ตัวจริง สถานะ รอตรวจ
@@ -97,3 +98,9 @@
 
 ## เอกสารอ้างอิง (ใน claude.ai Project "YANG Haus Back Office")
 `claude/purchase-invoice-bot-spec.md` · `claude/jstar-invoice-process.md` · `claude/line-oa-rules.md`
+
+## ค่าที่ไม่ใช่ความลับ
+- LINE channel: YH Purchase · Channel ID 2012697795 · Provider YangHaus
+- Apps Script: โปรเจกต์ "YH Purchase Bot" (thipwon.h@gmail.com) https://script.google.com/home/projects/1b1OpyxUlVBm8ovmwRWMJAdGPWlkVbleQukQPsgXJXcZRGwrxQhrKOA2x/edit
+- แก้โค้ดแล้วต้อง Deploy → Manage deployments → ✏️ → Version: New version (URL เดิม)
+- บอทตอบ webhook ด้วย HtmlService (ContentService ทำให้ LINE ได้ 302)

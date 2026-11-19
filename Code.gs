@@ -46,7 +46,7 @@ const BILL_HEAD = ['คีย์', 'ซัพพลายเออร์', 'ว�
 const QUEUE_HEAD = ['เวลารับ', 'แหล่ง', 'ซัพพลายเออร์', 'ผู้ส่ง', 'ชนิดข้อความ', 'messageId', 'fileId', 'สถานะ',
   'ชนิดเอกสาร', 'ผู้ขาย', 'เลขที่', 'วันที่เอกสาร', 'อ้างอิง', 'ยอด', 'VAT', 'ผลจับคู่', 'ลิงก์', 'ลองแล้ว', 'ข้อผิดพลาด'];
 const TEXT_HEAD = ['เวลา', 'แหล่ง', 'ซัพพลายเออร์', 'ผู้ส่ง', 'ข้อความ'];
-const CFG_HEAD = ['id (groupId/userId)', 'ชนิด', 'ซัพพลายเออร์ (JSTAR/PRR/RRL/YTL/AUTO)', 'ชื่อ', 'เปิดใช้', 'เก็บข้อความ (all/keyword/none)', 'หมายเหตุ', 'พบครั้งแรก'];
+const CFG_HEAD = ['id (groupId/userId)', 'ชนิด', 'ซัพพลายเออร์ (JSTAR/PRR/RRL/YTL/AUTO)', 'ชื่อ', 'เปิดใช้', 'เก็บข้อความ (all/keyword/none)', 'หมายเหตุ', 'พบครั้งแรก', 'ตอบรับในแชท'];
 const FOLLOW_HEAD = ['วันที่', 'ซัพพลายเออร์', 'ประเภท', 'รายละเอียด', 'ข้อความสำเร็จรูป'];
 
 /* =====================================================================
@@ -320,6 +320,18 @@ function buildFollowups_(bills, today, lastJstarReport) {
 /* =====================================================================
  * ส่วนที่ 2 — LINE webhook (รับอย่างเดียว)
  * ===================================================================== */
+const KIND_TAG = { tax_invoice: 'ใบกำกับภาษี', delivery_note: 'ใบส่งสินค้า', receipt: 'ใบเสร็จ', outstanding_report: 'รายงานบิลค้าง', sales_order: 'ใบสั่งขาย',
+  quotation: 'ใบเสนอราคา', order_ack: 'ใบรับจอง', credit_request: 'ใบขอวงเงิน', transfer_slip: 'สลิปโอน', platform_order: 'ออเดอร์' };
+
+/* ข้อความตอบรับ 1 เอกสาร — r = ผลจาก processRows_ (undefined = ยังไม่ได้อ่าน) */
+function ackText_(r) {
+  if (!r) return '📥 รับไฟล์แล้ว 1 ไฟล์ กำลังอ่าน (ดูผลได้ในแท็บ บอท-คิว ภายใน 5 นาที)';
+  if (r.status === 'SKIP') return 'ℹ️ ไฟล์นี้ไม่ใช่เอกสารซื้อ ไม่ได้เก็บ';
+  if (r.status !== 'DONE') return '📥 รับไฟล์แล้ว แต่ยังอ่านไม่สำเร็จ จะลองใหม่ในรอบถัดไป (5 นาที)';
+  const l2 = [r.no, num_(r.total) ? fmtMoney_(r.total) + ' บาท' : ''].filter(String).join(' · ');
+  return ['✅ เก็บแล้ว: ' + (KIND_TAG[r.kind] || 'เอกสาร') + ' ' + r.supplierName, l2, r.result].filter(String).join('\n');
+}
+
 function prop_(k) { return PropertiesService.getScriptProperties().getProperty(k); }
 function ss_() { return SpreadsheetApp.openById(SHEET_ID); }
 function now_() { return Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd HH:mm:ss'); }
@@ -341,14 +353,16 @@ function doPost(e) {
     if (!e || !e.parameter || e.parameter.k !== prop_('WEBHOOK_KEY')) return json_({ ok: false });
     const body = JSON.parse(e.postData.contents || '{}');
     const events = body.events || [];
+    const started = Date.now(), acks = [];
     if (!events.length) return json_({ ok: true });            // ปุ่ม Verify ของ LINE ส่ง events ว่าง
     const lock = LockService.getScriptLock();
     lock.waitLock(20000);
     try {
       const ss = ss_();
       const cfg = readCfg_(ss);
-      events.forEach(function (ev) { try { handleEvent_(ss, cfg, ev); } catch (err) { console.error('event ' + err); } });
+      events.forEach(function (ev) { try { handleEvent_(ss, cfg, ev, acks); } catch (err) { console.error('event ' + err); } });
     } finally { lock.releaseLock(); }
+    if (acks.length) ackNow_(acks, started);
   } catch (err) { console.error('doPost ' + err); }
   return json_({ ok: true });
 }
@@ -361,7 +375,8 @@ function readCfg_(ss) {
   for (let i = 1; i < v.length; i++) {
     if (!v[i][0]) continue;
     map[String(v[i][0])] = { row: i + 1, type: v[i][1], supplier: String(v[i][2] || '').toUpperCase().trim(), name: v[i][3],
-      on: v[i][4] === true || String(v[i][4]).toUpperCase() === 'TRUE', text: String(v[i][5] || 'keyword').toLowerCase().trim() };
+      on: v[i][4] === true || String(v[i][4]).toUpperCase() === 'TRUE', text: String(v[i][5] || 'keyword').toLowerCase().trim(),
+      ack: v[i][8] === true || String(v[i][8]).toUpperCase() === 'TRUE' };
   }
   return map;
 }
@@ -381,12 +396,14 @@ function registerSource_(ss, cfg, ev) {
   } catch (err) {}
   const sh = ss.getSheetByName(TAB_CFG);
   const row = nextRow_(sh);
-  sh.getRange(row, 1, 1, 8).setValues([[id, isGroup ? 'group' : 'user', isGroup ? '' : 'AUTO', name, false, isGroup ? 'keyword' : 'none', 'ใหม่ — เลือกซัพพลายเออร์แล้วติ๊กเปิดใช้', now_()]]);
+  /* ตอบรับในแชท: กลุ่ม = ปิดไว้ก่อน (กลุ่มซัพพลายเออร์ห้ามบอทพูด) · แชท 1:1 = เปิด */
+  sh.getRange(row, 1, 1, 9).setValues([[id, isGroup ? 'group' : 'user', isGroup ? '' : 'AUTO', name, false, isGroup ? 'keyword' : 'none', 'ใหม่ — เลือกซัพพลายเออร์แล้วติ๊กเปิดใช้', now_(), !isGroup]]);
   sh.getRange(row, 5).insertCheckboxes();
-  cfg[id] = { row: row, type: isGroup ? 'group' : 'user', supplier: '', name: name, on: false, text: 'none' };
+  sh.getRange(row, 9).insertCheckboxes();
+  cfg[id] = { row: row, type: isGroup ? 'group' : 'user', supplier: '', name: name, on: false, text: 'none', ack: false };
 }
 
-function handleEvent_(ss, cfg, ev) {
+function handleEvent_(ss, cfg, ev, acks) {
   if (ev.type === 'join' || ev.type === 'follow') { registerSource_(ss, cfg, ev); return; }
   if (ev.type !== 'message') return;
   registerSource_(ss, cfg, ev);
@@ -417,7 +434,31 @@ function handleEvent_(ss, cfg, ev) {
     const inbox = getOrCreate_(DriveApp.getFolderById(FOLDER_ID), INBOX_NAME);
     fileId = inbox.createFile(blob).getId();
   } catch (e2) { status = 'ERR'; err = String(e2).slice(0, 200); }
-  appendRow_(q, [when, src.name, src.supplier, sender, m.type, String(m.id), fileId, status, '', '', '', '', '', '', '', '', '', 0, err]);
+  const qRow = nextRow_(q);
+  q.getRange(qRow, 1, 1, 19).setValues([[when, src.name, src.supplier, sender, m.type, String(m.id), fileId, status, '', '', '', '', '', '', '', '', '', 0, err]]);
+  if (src.ack && acks && ev.replyToken) acks.push({ row: qRow, token: ev.replyToken, ok: status === 'NEW' });
+}
+
+/* ตอบรับในแชท (เฉพาะแหล่งที่ติ๊ก "ตอบรับในแชท") — ใช้ reply ซึ่งไม่นับโควต้า และ reply token ใช้ได้ครั้งเดียวภายใน ~1 นาที
+ * จึงอ่านเอกสารทันทีถ้าทัน (งบ 40 วินาที) ถ้าไม่ทันตอบแค่ว่ารับไฟล์แล้ว แล้วให้ processQueue รอบ 5 นาทีอ่านต่อ */
+function ackNow_(acks, started) {
+  let res = {};
+  const lock = LockService.getUserLock();
+  if (lock.tryLock(15000)) {
+    try {
+      const ss = ss_();
+      const rows = acks.filter(function (a) { return a.ok; }).map(function (a) { return a.row; });
+      if (rows.length) res = processRows_(ss, rows, started + 40000);
+    } catch (err) { console.error('ackNow ' + err); } finally { lock.releaseLock(); }
+  }
+  acks.forEach(function (a) {
+    try { replyText_(a.token, a.ok ? ackText_(res[a.row]) : '⚠️ รับไฟล์จาก LINE ไม่สำเร็จ รบกวนส่งใหม่อีกครั้งค่ะ'); } catch (err) { console.error('reply ' + err); }
+  });
+}
+
+function replyText_(token, text) {
+  UrlFetchApp.fetch('https://api.line.me/v2/bot/message/reply', { method: 'post', contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + prop_('LINE_TOKEN') }, payload: JSON.stringify({ replyToken: token, messages: [{ type: 'text', text: String(text).slice(0, 4900) }] }), muteHttpExceptions: true });
 }
 
 /* =====================================================================
@@ -556,42 +597,55 @@ function processQueue() {
   /* ใช้ user lock (กันรันซ้อนกันเอง) คนละตัวกับ script lock ของ webhook — ไม่งั้น webhook จะรอคิวอ่าน Gemini จนหมดเวลาแล้วเอกสารหาย */
   const lock = LockService.getUserLock();
   if (!lock.tryLock(1000)) return;
-  try {
-    const ss = ss_();
-    const q = ss.getSheetByName(TAB_QUEUE);
-    const v = q.getDataRange().getDisplayValues();
-    const todo = [];
-    for (let i = 1; i < v.length && todo.length < BATCH; i++) if (v[i][7] === 'NEW' && v[i][6]) todo.push(i);
-    if (!todo.length) return;
-    const bills = readBills_(ss);
-    const seen = {};                                             // กันเอกสารซ้ำ: ซัพพลายเออร์ + ชนิด + เลขที่
-    for (let i = 1; i < v.length; i++) if (v[i][7] === 'DONE' && v[i][10]) seen[v[i][2] + '|' + v[i][8] + '|' + v[i][10]] = true;
+  try { processRows_(ss_(), null, 0); } finally { lock.releaseLock(); }
+}
 
-    todo.forEach(function (i) {
-      const row = i + 1, tries = num_(v[i][17]) + 1;
-      try {
-        const file = DriveApp.getFileById(v[i][6]);
-        const doc = readDoc_(file) || {};
-        if (!doc.is_document) { file.setTrashed(true); q.getRange(row, 8, 1, 2).setValues([['SKIP', 'ไม่ใช่เอกสาร']]); return; }
-        let supplier = String(v[i][2] || '').toUpperCase();
-        if (!SUPPLIERS[supplier] || supplier === 'OTHER') supplier = detectSupplier_(doc);   // AUTO (แชท 1:1) → ดูจากผู้ขาย/ผู้รับโอน
-        const kind = docKind_(doc);
-        const no = normDocNo_(doc.doc_no);
-        const dupKey = supplier + '|' + kind + '|' + no;
-        const isDup = no && seen[dupKey];
-        const link = fileAway_(file, doc, supplier, kind, v[i][0]);
-        const result = isDup ? 'ซ้ำ: เคยลงแล้ว' : applyDoc_(bills, doc, supplier, link);
-        seen[dupKey] = true;
-        q.getRange(row, 3).setValue(supplier);
-        q.getRange(row, 8, 1, 12).setValues([['DONE', kind, doc.seller || doc.payee || '', no, doc.doc_date || '', normDocNo_(doc.ref_no),
-          num_(doc.total) || '', num_(doc.vat) || '', result, link, tries, '']]);
-      } catch (err) {
-        q.getRange(row, 8).setValue(tries >= MAX_TRIES ? 'ERR' : 'NEW');
-        q.getRange(row, 18, 1, 2).setValues([[tries, String(err).slice(0, 200)]]);
-      }
-    });
-    writeBills_(ss, bills);
-  } finally { lock.releaseLock(); }
+/* อ่านเอกสารในคิว — onlyRows = เลขแถวที่ต้องการ (ตอบรับทันที) หรือ null = แถว NEW ทั้งหมดไม่เกิน BATCH
+ * deadline = เวลา (ms) ที่ต้องหยุดเริ่มเอกสารใหม่ · 0 = ไม่จำกัด · ผู้เรียกต้องถือ user lock อยู่แล้ว
+ * คืน { เลขแถว: {status, kind, supplierName, no, total, result} } */
+function processRows_(ss, onlyRows, deadline) {
+  const out = {};
+  const q = ss.getSheetByName(TAB_QUEUE);
+  const v = q.getDataRange().getDisplayValues();
+  const todo = [];
+  for (let i = 1; i < v.length && todo.length < BATCH; i++) {
+    if (v[i][7] !== 'NEW' || !v[i][6]) continue;
+    if (onlyRows && onlyRows.indexOf(i + 1) < 0) continue;
+    todo.push(i);
+  }
+  if (!todo.length) return out;
+  const bills = readBills_(ss);
+  const seen = {};                                             // กันเอกสารซ้ำ: ซัพพลายเออร์ + ชนิด + เลขที่
+  for (let i = 1; i < v.length; i++) if (v[i][7] === 'DONE' && v[i][10]) seen[v[i][2] + '|' + v[i][8] + '|' + v[i][10]] = true;
+
+  todo.forEach(function (i) {
+    if (deadline && Date.now() > deadline) return;
+    const row = i + 1, tries = num_(v[i][17]) + 1;
+    try {
+      const file = DriveApp.getFileById(v[i][6]);
+      const doc = readDoc_(file) || {};
+      if (!doc.is_document) { file.setTrashed(true); q.getRange(row, 8, 1, 2).setValues([['SKIP', 'ไม่ใช่เอกสาร']]); out[row] = { status: 'SKIP' }; return; }
+      let supplier = String(v[i][2] || '').toUpperCase();
+      if (!SUPPLIERS[supplier] || supplier === 'OTHER') supplier = detectSupplier_(doc);   // AUTO (แชท 1:1) → ดูจากผู้ขาย/ผู้รับโอน
+      const kind = docKind_(doc);
+      const no = normDocNo_(doc.doc_no);
+      const dupKey = supplier + '|' + kind + '|' + no;
+      const isDup = no && seen[dupKey];
+      const link = fileAway_(file, doc, supplier, kind, v[i][0]);
+      const result = isDup ? 'ซ้ำ: เคยลงแล้ว' : applyDoc_(bills, doc, supplier, link);
+      seen[dupKey] = true;
+      q.getRange(row, 3).setValue(supplier);
+      q.getRange(row, 8, 1, 12).setValues([['DONE', kind, doc.seller || doc.payee || '', no, doc.doc_date || '', normDocNo_(doc.ref_no),
+        num_(doc.total) || '', num_(doc.vat) || '', result, link, tries, '']]);
+      out[row] = { status: 'DONE', kind: kind, supplierName: SUPPLIERS[supplier].name, no: no, total: num_(doc.total), result: result };
+    } catch (err) {
+      q.getRange(row, 8).setValue(tries >= MAX_TRIES ? 'ERR' : 'NEW');
+      q.getRange(row, 18, 1, 2).setValues([[tries, String(err).slice(0, 200)]]);
+      out[row] = { status: 'ERR' };
+    }
+  });
+  writeBills_(ss, bills);
+  return out;
 }
 
 /* =====================================================================

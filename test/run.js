@@ -3,7 +3,7 @@ const fs = require('fs'), vm = require('vm'), path = require('path');
 const code = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
 const ctx = { console };
 vm.createContext(ctx);
-vm.runInContext(code + '\nthis.T={normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_};', ctx);
+vm.runInContext(code + '\nthis.T={normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_,ackText_};', ctx);
 const T = ctx.T;
 let fail = 0;
 const eq = (a, b, m) => { const ok = JSON.stringify(a) === JSON.stringify(b); if (!ok) { fail++; console.log('FAIL', m, '\n  got ', JSON.stringify(a), '\n  want', JSON.stringify(b)); } else console.log('ok  ', m); };
@@ -107,6 +107,12 @@ const r2 = [];
 T.applyDoc_(r2, { doc_type: 'transfer_slip', doc_no: 'TRX2', doc_date: '2026-11-28', total: 40000 }, 'RRL', '');
 T.applyDoc_(r2, { title: 'บิลเงินสด/ใบกำกับภาษี', doc_type: 'tax_invoice', doc_no: 'HS6912-00001', doc_date: '2026-12-01', total: 39000, vat: 2551.4 }, 'RRL', 'x');
 eq(/ไม่ตรง/.test(r2[0].review), true, 'รุ่งเรือง: ยอดใบกำกับไม่ตรงยอดโอน → รอตรวจ');
+
+/* ข้อความตอบรับในแชท */
+eq(T.ackText_({ status: 'DONE', kind: 'tax_invoice', supplierName: 'เจสตาร์', no: 'IV02691100045', total: 12400, result: 'จับคู่แล้ว' }),
+  '✅ เก็บแล้ว: ใบกำกับภาษี เจสตาร์\nIV02691100045 · 12,400 บาท\nจับคู่แล้ว', 'ตอบรับ: อ่านสำเร็จ');
+eq(/กำลังอ่าน/.test(T.ackText_(undefined)), true, 'ตอบรับ: ยังไม่ได้อ่าน');
+eq(/ไม่ใช่เอกสาร/.test(T.ackText_({ status: 'SKIP' })), true, 'ตอบรับ: ไม่ใช่เอกสาร');
 
 console.log(fail ? '\n' + fail + ' รายการไม่ผ่าน' : '\nผ่านทั้งหมด');
 process.exit(fail ? 1 : 0);
