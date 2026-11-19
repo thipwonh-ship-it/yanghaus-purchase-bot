@@ -44,7 +44,7 @@ const BILL_HEAD = ['คีย์', 'ซัพพลายเออร์', 'ว�
   'จ่ายแล้ว', 'วันที่จ่าย', 'เลขใบเสร็จ/สลิป', 'เลขใบกำกับ', 'วันที่ใบกำกับ', 'ยอดใบกำกับ', 'ลิงก์ใบกำกับ',
   'ได้ตัวจริง', 'สถานะ', 'รอตรวจ', 'อัปเดตล่าสุด'];
 const QUEUE_HEAD = ['เวลารับ', 'แหล่ง', 'ซัพพลายเออร์', 'ผู้ส่ง', 'ชนิดข้อความ', 'messageId', 'fileId', 'สถานะ',
-  'ชนิดเอกสาร', 'ผู้ขาย', 'เลขที่', 'วันที่เอกสาร', 'อ้างอิง', 'ยอด', 'VAT', 'ผลจับคู่', 'ลิงก์', 'ลองแล้ว', 'ข้อผิดพลาด'];
+  'ชนิดเอกสาร', 'ผู้ขาย', 'เลขที่', 'วันที่เอกสาร', 'อ้างอิง', 'ยอด', 'VAT', 'ผลจับคู่', 'ลิงก์', 'ลองแล้ว', 'ข้อผิดพลาด', 'รอตอบรับ (ระบบใช้ชั่วคราว)'];
 const TEXT_HEAD = ['เวลา', 'แหล่ง', 'ซัพพลายเออร์', 'ผู้ส่ง', 'ข้อความ'];
 const CFG_HEAD = ['id (groupId/userId)', 'ชนิด', 'ซัพพลายเออร์ (JSTAR/PRR/RRL/YTL/AUTO)', 'ชื่อ', 'เปิดใช้', 'เก็บข้อความ (all/keyword/none)', 'หมายเหตุ', 'พบครั้งแรก', 'ตอบรับในแชท (ไม่ตอบ/เฉพาะเอกสารสำคัญ/ทุกไฟล์)'];
 const FOLLOW_HEAD = ['วันที่', 'ซัพพลายเออร์', 'ประเภท', 'รายละเอียด', 'ข้อความสำเร็จรูป'];
@@ -332,18 +332,25 @@ function ackMode_(v) {
 }
 const KEY_KINDS = ['tax_invoice', 'receipt', 'delivery_note'];
 
-/* ข้อความตอบรับ 1 เอกสาร — r = ผลจาก processRows_ (undefined = ยังไม่ได้อ่าน) · คืน '' = ไม่ต้องตอบ
- * โหมด key (กลุ่มซัพพลายเออร์): บรรทัดเดียว เฉพาะ 3 เอกสารสำคัญ ไม่บอกสถานะจับคู่ ไม่ตอบกรณีอื่นเลย */
-function ackText_(r, mode) {
-  if (mode === 'key') {
-    if (!r || r.status !== 'DONE' || KEY_KINDS.indexOf(r.kind) < 0) return '';
-    return ['✅ เก็บ' + KIND_TAG[r.kind] + 'แล้ว', r.no, num_(r.total) ? fmtMoney_(r.total) + ' บาท' : ''].filter(String).join(' · ');
+/* ข้อความตอบรับ "ข้อความเดียว" สำหรับเอกสารที่ส่งมาชุดเดียวกัน — items = [{status, kind, no, result}] · คืน '' = ไม่ต้องตอบ
+ * แจ้งแค่ชนิด + เลขที่เอกสาร (ไม่แจ้งยอดเงิน) · โหมด key: เฉพาะ ใบกำกับ/ใบเสร็จ/ใบส่งสินค้า ที่อ่านสำเร็จ กรณีอื่นเงียบ */
+function ackSummary_(items, mode) {
+  const done = items.filter(function (r) { return r.status === 'DONE'; });
+  const kinds = KEY_KINDS.slice();
+  if (mode === 'all') done.forEach(function (r) { if (kinds.indexOf(r.kind) < 0) kinds.push(r.kind); });
+  const lines = [];
+  kinds.forEach(function (k) {
+    const nos = done.filter(function (r) { return r.kind === k; })
+      .map(function (r) { return (r.no || '(ไม่มีเลขที่)') + (/^ซ้ำ/.test(r.result || '') ? ' (ซ้ำ)' : ''); });
+    if (nos.length) lines.push('✅ เก็บ' + (KIND_TAG[k] || 'เอกสาร') + 'แล้ว' + (nos.length > 1 ? ' ' + nos.length + ' ใบ' : '') + ': ' + nos.join(', '));
+  });
+  if (mode === 'all') {
+    const skip = items.filter(function (r) { return r.status === 'SKIP'; }).length;
+    const wait = items.filter(function (r) { return r.status !== 'DONE' && r.status !== 'SKIP'; }).length;
+    if (skip) lines.push('ℹ️ ไม่ใช่เอกสาร ' + skip + ' ไฟล์ (ไม่ได้เก็บ)');
+    if (wait) lines.push('📥 รับแล้วแต่ยังอ่านไม่เสร็จ ' + wait + ' ไฟล์ (อ่านต่อในรอบ 5 นาที)');
   }
-  if (!r) return '📥 รับไฟล์แล้ว 1 ไฟล์ กำลังอ่าน (ดูผลได้ในแท็บ บอท-คิว ภายใน 5 นาที)';
-  if (r.status === 'SKIP') return 'ℹ️ ไฟล์นี้ไม่ใช่เอกสารซื้อ ไม่ได้เก็บ';
-  if (r.status !== 'DONE') return '📥 รับไฟล์แล้ว แต่ยังอ่านไม่สำเร็จ จะลองใหม่ในรอบถัดไป (5 นาที)';
-  const l2 = [r.no, num_(r.total) ? fmtMoney_(r.total) + ' บาท' : ''].filter(String).join(' · ');
-  return ['✅ เก็บแล้ว: ' + (KIND_TAG[r.kind] || 'เอกสาร') + ' ' + r.supplierName, l2, r.result].filter(String).join('\n');
+  return lines.join('\n');
 }
 
 function prop_(k) { return PropertiesService.getScriptProperties().getProperty(k); }
@@ -367,7 +374,7 @@ function doPost(e) {
     if (!e || !e.parameter || e.parameter.k !== prop_('WEBHOOK_KEY')) return json_({ ok: false });
     const body = JSON.parse(e.postData.contents || '{}');
     const events = body.events || [];
-    const started = Date.now(), acks = [];
+    const acks = [];
     if (!events.length) return json_({ ok: true });            // ปุ่ม Verify ของ LINE ส่ง events ว่าง
     const lock = LockService.getScriptLock();
     lock.waitLock(20000);
@@ -376,7 +383,7 @@ function doPost(e) {
       const cfg = readCfg_(ss);
       events.forEach(function (ev) { try { handleEvent_(ss, cfg, ev, acks); } catch (err) { console.error('event ' + err); } });
     } finally { lock.releaseLock(); }
-    if (acks.length) ackNow_(acks, started);
+    if (acks.length) ackCollect_();
   } catch (err) { console.error('doPost ' + err); }
   return json_({ ok: true });
 }
@@ -449,28 +456,62 @@ function handleEvent_(ss, cfg, ev, acks) {
     fileId = inbox.createFile(blob).getId();
   } catch (e2) { status = 'ERR'; err = String(e2).slice(0, 200); }
   const qRow = nextRow_(q);
-  q.getRange(qRow, 1, 1, 19).setValues([[when, src.name, src.supplier, sender, m.type, String(m.id), fileId, status, '', '', '', '', '', '', '', '', '', 0, err]]);
-  if (src.ack && acks && ev.replyToken) acks.push({ row: qRow, token: ev.replyToken, ok: status === 'NEW', mode: src.ack });
+  /* คอลัมน์ 20 = โหมด|เวลารับ(ms)|replyToken — เก็บชั่วคราวให้ ackCollect_ รวมตอบทีเดียว แล้วล้างทิ้ง */
+  const pend = src.ack && ev.replyToken ? src.ack + '|' + Date.now() + '|' + ev.replyToken : '';
+  q.getRange(qRow, 1, 1, 20).setValues([[when, src.name, src.supplier, sender, m.type, String(m.id), fileId, status, '', '', '', '', '', '', '', '', '', 0, err, pend]]);
+  if (pend && acks) acks.push(qRow);
 }
 
-/* ตอบรับในแชท (เฉพาะแหล่งที่ติ๊ก "ตอบรับในแชท") — ใช้ reply ซึ่งไม่นับโควต้า และ reply token ใช้ได้ครั้งเดียวภายใน ~1 นาที
- * จึงอ่านเอกสารทันทีถ้าทัน (งบ 40 วินาที) ถ้าไม่ทันตอบแค่ว่ารับไฟล์แล้ว แล้วให้ processQueue รอบ 5 นาทีอ่านต่อ */
-function ackNow_(acks, started) {
-  let res = {};
+/* ตอบรับในแชท — รวมเอกสารที่ส่งมาชุดเดียวกันเป็น "ข้อความเดียว"
+ * LINE ส่งรูปแต่ละใบมาเป็น webhook แยกกัน → ทุก webhook ฝาก replyToken ไว้ในคิว แล้วตัวที่ได้ user lock เป็น "ผู้รวม":
+ * อ่านเอกสารที่รอ (พร้อมกันหลายใบ) → รอ 2 วินาทีเผื่อใบที่ตามมา → ไม่มีเพิ่มแล้วจึงตอบครั้งเดียวด้วย token ใหม่สุด
+ * (reply ไม่นับโควต้า · token ใช้ได้ครั้งเดียวภายใน ~1 นาที จึงมีงบรวม 45 วินาที ที่อ่านไม่ทันปล่อยให้ processQueue อ่านต่อโดยไม่ตอบ) */
+function ackCollect_() {
   const lock = LockService.getUserLock();
-  if (lock.tryLock(15000)) {
-    try {
-      const ss = ss_();
-      const rows = acks.filter(function (a) { return a.ok; }).map(function (a) { return a.row; });
-      if (rows.length) res = processRows_(ss, rows, started + 40000);
-    } catch (err) { console.error('ackNow ' + err); } finally { lock.releaseLock(); }
+  if (!lock.tryLock(20000)) return;                              // มีผู้รวมทำงานอยู่ — เขาจะเห็นแถวของเราเอง
+  try {
+    const ss = ss_(), q = ss.getSheetByName(TAB_QUEUE);
+    const hardStop = Date.now() + 45000, tried = {};
+    let idle = 0;
+    while (Date.now() < hardStop) {
+      SpreadsheetApp.flush();
+      const v = q.getDataRange().getDisplayValues();
+      const rows = [];
+      let pending = 0;
+      for (let i = 1; i < v.length; i++) {
+        if (!v[i][19]) continue;
+        pending++;
+        if (v[i][7] === 'NEW' && v[i][6] && !tried[i + 1] && rows.length < BATCH) { rows.push(i + 1); tried[i + 1] = true; }
+      }
+      if (!pending) return;
+      if (rows.length) { processRows_(ss, rows, hardStop); idle = 0; continue; }
+      if (++idle >= 2) break;
+      Utilities.sleep(2000);
+    }
+    sendAcks_(q);
+  } catch (err) { console.error('ackCollect ' + err); } finally { lock.releaseLock(); }
+}
+
+function sendAcks_(q) {
+  SpreadsheetApp.flush();
+  const v = q.getDataRange().getDisplayValues();
+  const now = Date.now(), groups = {};
+  for (let i = 1; i < v.length; i++) {
+    if (!v[i][19]) continue;
+    q.getRange(i + 1, 20).setValue('');                          // ล้างทุกแถวที่รอ ไม่ว่าจะได้ตอบหรือไม่
+    const p = String(v[i][19]).split('|'), ms = +p[1];
+    if (now - ms > 90000) continue;                              // ค้างจากรอบก่อน (เช่นสคริปต์ล่ม) ไม่เอามารวม
+    const g = groups[v[i][1]] || (groups[v[i][1]] = { mode: p[0], ms: 0, token: '', items: [] });
+    if (ms > g.ms) { g.ms = ms; g.token = p.slice(2).join('|'); }
+    g.items.push({ status: v[i][7], kind: v[i][8], no: v[i][10], result: v[i][15] });
   }
-  acks.forEach(function (a) {
+  for (const name in groups) {
+    const g = groups[name];
     try {
-      const text = a.ok ? ackText_(res[a.row], a.mode) : (a.mode === 'all' ? '⚠️ รับไฟล์จาก LINE ไม่สำเร็จ รบกวนส่งใหม่อีกครั้งค่ะ' : '');
-      if (text) replyText_(a.token, text);
+      const text = ackSummary_(g.items, g.mode);
+      if (text && g.token && now - g.ms < 55000) replyText_(g.token, text);
     } catch (err) { console.error('reply ' + err); }
-  });
+  }
 }
 
 function replyText_(token, text) {
@@ -546,6 +587,9 @@ function geminiJson_(parts) {
   const res = geminiFetch_(key, { contents: [{ parts: parts }], generationConfig: { temperature: 0, responseMimeType: 'application/json' } });
   const code = res.getResponseCode(), raw = res.getContentText();
   if (code !== 200) throw new Error('Gemini ' + code + ' ' + raw.slice(0, 120));
+  return parseGemini_(raw);
+}
+function parseGemini_(raw) {
   const cand = (JSON.parse(raw).candidates || [])[0] || {};
   const text = ((cand.content || {}).parts || []).map(function (p) { return p.text || ''; }).join('');
   if (!text) throw new Error('Gemini ไม่มีคำตอบ (' + (cand.finishReason || '?') + ')');
@@ -557,6 +601,29 @@ function readDoc_(file) {
   if (!/pdf|image\//.test(mime)) return { is_document: false };
   const d = geminiJson_([{ text: DOC_PROMPT }, { inline_data: { mime_type: mime, data: Utilities.base64Encode(blob.getBytes()) } }]);
   return Array.isArray(d) ? d[0] : d;
+}
+/* อ่านหลายไฟล์พร้อมกัน (fetchAll) ด้วยรุ่นที่ใช้ได้ล่าสุด — คืน array ตามลำดับ · null = ใบนั้นไม่สำเร็จ ให้ผู้เรียกอ่านทีละใบด้วย readDoc_ แทน */
+function readDocsParallel_(files) {
+  const out = files.map(function () { return null; });
+  try {
+    const key = prop_('GEMINI_API_KEY');
+    const model = prop_('GEMINI_MODEL_OK') || geminiModels_(key)[0];
+    const reqs = [], idx = [];
+    files.forEach(function (f, k) {
+      if (!f) return;
+      const blob = f.getBlob(), mime = blob.getContentType();
+      if (!/pdf|image\//.test(mime)) { out[k] = { is_document: false }; return; }
+      idx.push(k);
+      reqs.push({ url: 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + key, method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+        payload: JSON.stringify({ contents: [{ parts: [{ text: DOC_PROMPT }, { inline_data: { mime_type: mime, data: Utilities.base64Encode(blob.getBytes()) } }] }],
+          generationConfig: { temperature: 0, responseMimeType: 'application/json' } }) });
+    });
+    if (!reqs.length) return out;
+    UrlFetchApp.fetchAll(reqs).forEach(function (res, j) {
+      try { if (res.getResponseCode() === 200) { const d = parseGemini_(res.getContentText()); out[idx[j]] = Array.isArray(d) ? d[0] : d; } } catch (e) {}
+    });
+  } catch (err) { console.error('parallel ' + err); }
+  return out;
 }
 
 /* ทะเบียนบิล ↔ ชีท */
@@ -635,12 +702,16 @@ function processRows_(ss, onlyRows, deadline) {
   const seen = {};                                             // กันเอกสารซ้ำ: ซัพพลายเออร์ + ชนิด + เลขที่
   for (let i = 1; i < v.length; i++) if (v[i][7] === 'DONE' && v[i][10]) seen[v[i][2] + '|' + v[i][8] + '|' + v[i][10]] = true;
 
-  todo.forEach(function (i) {
+  /* หลายใบ → อ่านพร้อมกันก่อน (เร็วกว่าอ่านทีละใบหลายเท่า) ใบที่ไม่สำเร็จค่อยอ่านเดี่ยวในลูปด้านล่าง */
+  const files = todo.map(function (i) { try { return DriveApp.getFileById(v[i][6]); } catch (e) { return null; } });
+  const pre = todo.length > 1 ? readDocsParallel_(files) : [];
+
+  todo.forEach(function (i, k) {
     if (deadline && Date.now() > deadline) return;
     const row = i + 1, tries = num_(v[i][17]) + 1;
     try {
-      const file = DriveApp.getFileById(v[i][6]);
-      const doc = readDoc_(file) || {};
+      const file = files[k] || DriveApp.getFileById(v[i][6]);
+      const doc = pre[k] || readDoc_(file) || {};
       if (!doc.is_document) { file.setTrashed(true); q.getRange(row, 8, 1, 2).setValues([['SKIP', 'ไม่ใช่เอกสาร']]); out[row] = { status: 'SKIP' }; return; }
       let supplier = String(v[i][2] || '').toUpperCase();
       if (!SUPPLIERS[supplier] || supplier === 'OTHER') supplier = detectSupplier_(doc);   // AUTO (แชท 1:1) → ดูจากผู้ขาย/ผู้รับโอน

@@ -3,7 +3,7 @@ const fs = require('fs'), vm = require('vm'), path = require('path');
 const code = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
 const ctx = { console };
 vm.createContext(ctx);
-vm.runInContext(code + '\nthis.T={normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_,ackText_,ackMode_};', ctx);
+vm.runInContext(code + '\nthis.T={normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_,ackSummary_,ackMode_};', ctx);
 const T = ctx.T;
 let fail = 0;
 const eq = (a, b, m) => { const ok = JSON.stringify(a) === JSON.stringify(b); if (!ok) { fail++; console.log('FAIL', m, '\n  got ', JSON.stringify(a), '\n  want', JSON.stringify(b)); } else console.log('ok  ', m); };
@@ -108,14 +108,16 @@ T.applyDoc_(r2, { doc_type: 'transfer_slip', doc_no: 'TRX2', doc_date: '2026-11-
 T.applyDoc_(r2, { title: 'บิลเงินสด/ใบกำกับภาษี', doc_type: 'tax_invoice', doc_no: 'HS6912-00001', doc_date: '2026-12-01', total: 39000, vat: 2551.4 }, 'RRL', 'x');
 eq(/ไม่ตรง/.test(r2[0].review), true, 'รุ่งเรือง: ยอดใบกำกับไม่ตรงยอดโอน → รอตรวจ');
 
-/* ข้อความตอบรับในแชท */
-eq(T.ackText_({ status: 'DONE', kind: 'tax_invoice', supplierName: 'เจสตาร์', no: 'IV02691100045', total: 12400, result: 'จับคู่แล้ว' }),
-  '✅ เก็บแล้ว: ใบกำกับภาษี เจสตาร์\nIV02691100045 · 12,400 บาท\nจับคู่แล้ว', 'ตอบรับ: อ่านสำเร็จ');
-eq(/กำลังอ่าน/.test(T.ackText_(undefined)), true, 'ตอบรับ: ยังไม่ได้อ่าน');
-eq(/ไม่ใช่เอกสาร/.test(T.ackText_({ status: 'SKIP' })), true, 'ตอบรับ: ไม่ใช่เอกสาร');
-eq(T.ackText_({ status: 'DONE', kind: 'tax_invoice', supplierName: 'เจสตาร์', no: 'IV02691100045', total: 12400, result: 'จับคู่แล้ว' }, 'key'),
-  '✅ เก็บใบกำกับภาษีแล้ว · IV02691100045 · 12,400 บาท', 'ตอบรับกลุ่มซัพฯ: ใบกำกับ บรรทัดเดียว');
-eq([T.ackText_(undefined, 'key'), T.ackText_({ status: 'DONE', kind: 'transfer_slip', no: 'X', total: 5 }, 'key'), T.ackText_({ status: 'SKIP' }, 'key')], ['', '', ''], 'ตอบรับกลุ่มซัพฯ: กรณีอื่นเงียบ');
+/* ข้อความตอบรับในแชท — รวมเป็นข้อความเดียว ไม่แจ้งยอดเงิน */
+const AK = (kind, no, result) => ({ status: 'DONE', kind, no, result: result || '' });
+eq(T.ackSummary_([AK('tax_invoice', 'IV1'), AK('tax_invoice', 'IV2'), AK('tax_invoice', 'IV3'), AK('tax_invoice', 'IV4'), AK('tax_invoice', 'IV5')], 'key'),
+  '✅ เก็บใบกำกับภาษีแล้ว 5 ใบ: IV1, IV2, IV3, IV4, IV5', 'ตอบรับ: ใบกำกับ 5 ใบ ข้อความเดียว');
+eq(T.ackSummary_([AK('tax_invoice', 'IV1')], 'key'), '✅ เก็บใบกำกับภาษีแล้ว: IV1', 'ตอบรับ: ใบเดียว');
+eq(T.ackSummary_([AK('delivery_note', 'DN1'), AK('tax_invoice', 'IV1', 'ซ้ำ: เคยลงแล้ว'), AK('transfer_slip', 'X'), { status: 'SKIP' }, { status: 'NEW' }], 'key'),
+  '✅ เก็บใบกำกับภาษีแล้ว: IV1 (ซ้ำ)\n✅ เก็บใบส่งสินค้าแล้ว: DN1', 'ตอบรับกลุ่มซัพฯ: คละชนิด สลิป/ไม่ใช่เอกสาร/ยังไม่อ่าน ไม่พูดถึง');
+eq(T.ackSummary_([AK('transfer_slip', 'X'), { status: 'SKIP' }, { status: 'NEW' }], 'key'), '', 'ตอบรับกลุ่มซัพฯ: ไม่มีเอกสารสำคัญ = เงียบ');
+eq(T.ackSummary_([AK('transfer_slip', 'X'), { status: 'SKIP' }, { status: 'ERR' }], 'all'),
+  '✅ เก็บสลิปโอนแล้ว: X\nℹ️ ไม่ใช่เอกสาร 1 ไฟล์ (ไม่ได้เก็บ)\n📥 รับแล้วแต่ยังอ่านไม่เสร็จ 1 ไฟล์ (อ่านต่อในรอบ 5 นาที)', 'ตอบรับทุกไฟล์');
 eq([T.ackMode_('ไม่ตอบ'), T.ackMode_(''), T.ackMode_('เฉพาะเอกสารสำคัญ'), T.ackMode_('ทุกไฟล์'), T.ackMode_(true)], ['', '', 'key', 'all', 'all'], 'โหมดตอบรับ');
 
 console.log(fail ? '\n' + fail + ' รายการไม่ผ่าน' : '\nผ่านทั้งหมด');
