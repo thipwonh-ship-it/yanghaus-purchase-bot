@@ -57,6 +57,8 @@ const FOLLOW_HEAD = ['วันที่', 'ซัพพลายเออร์
 function normDocNo_(s) {
   let t = String(s == null ? '' : s).toUpperCase().replace(/[^A-Z0-9-]/g, '');
   t = t.replace(/^(TV|1V|LV)/, 'IV').replace(/^IVO(?=\d)/, 'IV0').replace(/^S0(?=\d{6,})/, 'SO');
+  /* เลขเอกสารเจสตาร์ IV + ตัวเลขล้วน: ตัวอักษรที่หลงมาในส่วนตัวเลขคือ OCR อ่านผิด (S→5, O→0, I/L→1, B→8, Z→2) */
+  if (/^IV(?!CM)[0-9SOILBZ]{6,}$/.test(t)) t = 'IV' + t.slice(2).replace(/S/g, '5').replace(/O/g, '0').replace(/[IL]/g, '1').replace(/B/g, '8').replace(/Z/g, '2');
   return t;
 }
 /* เจสตาร์: เลข IVCM… = ยางเคลม/รับคืนสินค้า ไม่ใช่การซื้อ ไม่ต้องตามใบกำกับ (Thipwon 19 พ.ย. 2026) */
@@ -344,12 +346,11 @@ function ackSummary_(items, mode) {
       .map(function (r) { return (r.no || '(ไม่มีเลขที่)') + (/^ซ้ำ/.test(r.result || '') ? ' (ซ้ำ)' : ''); });
     if (nos.length) lines.push('✅ เก็บ' + (KIND_TAG[k] || 'เอกสาร') + 'แล้ว' + (nos.length > 1 ? ' ' + nos.length + ' ใบ' : '') + ': ' + nos.join(', '));
   });
-  if (mode === 'all') {
-    const skip = items.filter(function (r) { return r.status === 'SKIP'; }).length;
-    const wait = items.filter(function (r) { return r.status !== 'DONE' && r.status !== 'SKIP'; }).length;
-    if (skip) lines.push('ℹ️ ไม่ใช่เอกสาร ' + skip + ' ไฟล์ (ไม่ได้เก็บ)');
-    if (wait) lines.push('📥 รับแล้วแต่ยังอ่านไม่เสร็จ ' + wait + ' ไฟล์ (อ่านต่อในรอบ 5 นาที)');
-  }
+  const skip = items.filter(function (r) { return r.status === 'SKIP'; }).length;
+  const wait = items.filter(function (r) { return r.status !== 'DONE' && r.status !== 'SKIP'; }).length;
+  if (mode === 'all' && skip) lines.push('ℹ️ ไม่ใช่เอกสาร ' + skip + ' ไฟล์ (ไม่ได้เก็บ)');
+  /* โหมด key: บอกจำนวนที่ยังอ่านไม่เสร็จเฉพาะเมื่อมีบรรทัดเก็บแล้วอยู่ด้วย — ไม่งั้นส่ง 15 ใบแล้วบอทตอบ "4 ใบ" คนจะคิดว่าที่เหลือหาย */
+  if (wait && (mode === 'all' || lines.length)) lines.push('📥 อีก ' + wait + ' ไฟล์รับแล้ว กำลังอ่านต่อ (ไม่แจ้งซ้ำ)');
   return lines.join('\n');
 }
 
@@ -367,6 +368,12 @@ function nextRow_(sh) {
 }
 function appendRow_(sh, row) { sh.getRange(nextRow_(sh), 1, 1, row.length).setValues([row]); }
 
+function withLock_(fn) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try { const r = fn(); SpreadsheetApp.flush(); return r; } finally { lock.releaseLock(); }
+}
+
 function doGet() { return json_({ ok: true, app: 'YH Purchase' }); }
 
 function doPost(e) {
@@ -376,13 +383,11 @@ function doPost(e) {
     const events = body.events || [];
     const acks = [];
     if (!events.length) return json_({ ok: true });            // ปุ่ม Verify ของ LINE ส่ง events ว่าง
-    const lock = LockService.getScriptLock();
-    lock.waitLock(20000);
-    try {
-      const ss = ss_();
-      const cfg = readCfg_(ss);
-      events.forEach(function (ev) { try { handleEvent_(ss, cfg, ev, acks); } catch (err) { console.error('event ' + err); } });
-    } finally { lock.releaseLock(); }
+    /* ไม่ล็อกทั้งก้อน: ส่งรูปพร้อมกัน 15 ใบ = 15 webhook พร้อมกัน ถ้าต่อคิวล็อกตอนดาวน์โหลดไฟล์ ใบท้าย ๆ จะรอจนหมดเวลาแล้วหาย
+     * จึงดาวน์โหลด/เซฟไฟล์นอกล็อก แล้วล็อกเฉพาะตอนเขียนชีท (withLock_) ซึ่งใช้เวลาสั้นมาก */
+    const ss = ss_();
+    const cfg = readCfg_(ss);
+    events.forEach(function (ev) { try { handleEvent_(ss, cfg, ev, acks); } catch (err) { console.error('event ' + err); } });
     if (acks.length) ackCollect_();
   } catch (err) { console.error('doPost ' + err); }
   return json_({ ok: true });
@@ -408,6 +413,11 @@ function sourceId_(ev) { const s = ev.source || {}; return s.groupId || s.roomId
 function registerSource_(ss, cfg, ev) {
   const id = sourceId_(ev);
   if (!id || cfg[id]) return;
+  withLock_(function () { registerSourceLocked_(ss, cfg, ev, id); });
+}
+function registerSourceLocked_(ss, cfg, ev, id) {
+  const fresh = readCfg_(ss);                                    // webhook อื่นอาจเพิ่งลงทะเบียนแหล่งเดียวกันไปแล้ว
+  if (fresh[id]) { cfg[id] = fresh[id]; return; }
   const isGroup = !!((ev.source || {}).groupId);
   let name = '';
   try {
@@ -436,7 +446,7 @@ function handleEvent_(ss, cfg, ev, acks) {
 
   if (m.type === 'text') {
     const keep = src.text === 'all' || (src.text === 'keyword' && TEXT_KEYWORDS.test(m.text || ''));
-    if (keep) appendRow_(ss.getSheetByName(TAB_TEXT), [when, src.name, src.supplier, sender, String(m.text || '').slice(0, 2000)]);
+    if (keep) withLock_(function () { appendRow_(ss.getSheetByName(TAB_TEXT), [when, src.name, src.supplier, sender, String(m.text || '').slice(0, 2000)]); });
     return;
   }
   if (m.type !== 'image' && m.type !== 'file') return;           // สติกเกอร์ วิดีโอ เสียง ตำแหน่ง: ไม่เก็บ
@@ -455,10 +465,13 @@ function handleEvent_(ss, cfg, ev, acks) {
     const inbox = getOrCreate_(DriveApp.getFolderById(FOLDER_ID), INBOX_NAME);
     fileId = inbox.createFile(blob).getId();
   } catch (e2) { status = 'ERR'; err = String(e2).slice(0, 200); }
-  const qRow = nextRow_(q);
   /* คอลัมน์ 20 = โหมด|เวลารับ(ms)|replyToken — เก็บชั่วคราวให้ ackCollect_ รวมตอบทีเดียว แล้วล้างทิ้ง */
   const pend = src.ack && ev.replyToken ? src.ack + '|' + Date.now() + '|' + ev.replyToken : '';
-  q.getRange(qRow, 1, 1, 20).setValues([[when, src.name, src.supplier, sender, m.type, String(m.id), fileId, status, '', '', '', '', '', '', '', '', '', 0, err, pend]]);
+  const qRow = withLock_(function () {
+    const r = nextRow_(q);
+    q.getRange(r, 1, 1, 20).setValues([[when, src.name, src.supplier, sender, m.type, String(m.id), fileId, status, '', '', '', '', '', '', '', '', '', 0, err, pend]]);
+    return r;
+  });
   if (pend && acks) acks.push(qRow);
 }
 
@@ -719,7 +732,9 @@ function processRows_(ss, onlyRows, deadline) {
       const no = normDocNo_(doc.doc_no);
       const dupKey = supplier + '|' + kind + '|' + no;
       const isDup = no && seen[dupKey];
-      const link = fileAway_(file, doc, supplier, kind, v[i][0]);
+      /* เอกสารซ้ำ (เลขที่เดิม ชนิดเดิม ซัพพลายเออร์เดิม): ไม่เก็บไฟล์ซ้ำใน Drive ทิ้งลงถังขยะ */
+      let link = '';
+      if (isDup) file.setTrashed(true); else link = fileAway_(file, doc, supplier, kind, v[i][0]);
       const result = isDup ? 'ซ้ำ: เคยลงแล้ว' : applyDoc_(bills, doc, supplier, link);
       seen[dupKey] = true;
       q.getRange(row, 3).setValue(supplier);
