@@ -59,6 +59,8 @@ function normDocNo_(s) {
   t = t.replace(/^(TV|1V|LV)/, 'IV').replace(/^IVO(?=\d)/, 'IV0').replace(/^S0(?=\d{6,})/, 'SO');
   return t;
 }
+/* เจสตาร์: เลข IVCM… = ยางเคลม/รับคืนสินค้า ไม่ใช่การซื้อ ไม่ต้องตามใบกำกับ (Thipwon 19 พ.ย. 2026) */
+function isClaim_(no) { return /^IVCM/.test(String(no || '')); }
 function num_(v) { const n = parseFloat(String(v == null ? '' : v).replace(/[, ]/g, '')); return isFinite(n) ? n : 0; }
 function round2_(n) { return Math.round((n + Number.EPSILON) * 100) / 100; }
 function sameAmt_(a, b) { return Math.abs(num_(a) - num_(b)) <= 1; }
@@ -141,6 +143,7 @@ function applyDoc_(bills, doc, supplier, link) {
     if (cc && cc !== JSTAR_CUSTOMER_CODE) return 'ข้าม: เอกสารของลูกค้ารหัส ' + cc;
     if (kind === 'delivery_note') {
       if (!no) return 'รอตรวจ: อ่านเลขใบส่งสินค้าไม่ได้';
+      if (isClaim_(no)) return 'ข้าม: ยางเคลม/รับคืน ' + no;
       const b = getBill_(bills, 'JSTAR|' + no, 'JSTAR');
       b.no = no; b.date = date || b.date; b.hasDN = true; b.srcLink = link || b.srcLink;
       if (b.amount && !sameAmt_(b.amount, total)) addNote_(b, 'ยอดใบส่งสินค้า ' + fmtMoney_(total) + ' ไม่ตรงยอดเดิม ' + fmtMoney_(b.amount));
@@ -150,7 +153,7 @@ function applyDoc_(bills, doc, supplier, link) {
     if (kind === 'outstanding_report') {
       let n = 0;
       lines.forEach(function (l) {
-        const k = normDocNo_(l.doc_no); if (!k) return;
+        const k = normDocNo_(l.doc_no); if (!k || isClaim_(k)) return;
         const b = getBill_(bills, 'JSTAR|' + k, 'JSTAR');
         b.no = k; b.date = b.date || l.doc_date || '';
         if (!b.amount) b.amount = num_(l.amount);
@@ -162,7 +165,7 @@ function applyDoc_(bills, doc, supplier, link) {
     if (kind === 'receipt') {
       let n = 0;
       lines.forEach(function (l) {
-        const k = normDocNo_(l.doc_no); if (!k) return;
+        const k = normDocNo_(l.doc_no); if (!k || isClaim_(k)) return;
         const b = getBill_(bills, 'JSTAR|' + k, 'JSTAR');
         b.no = k; b.date = b.date || l.doc_date || '';
         if (!b.amount) b.amount = num_(l.amount);
