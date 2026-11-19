@@ -3,7 +3,7 @@ const fs = require('fs'), vm = require('vm'), path = require('path');
 const code = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
 const ctx = { console };
 vm.createContext(ctx);
-vm.runInContext(code + '\nthis.T={normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_,ackText_};', ctx);
+vm.runInContext(code + '\nthis.T={normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_,ackText_,ackMode_};', ctx);
 const T = ctx.T;
 let fail = 0;
 const eq = (a, b, m) => { const ok = JSON.stringify(a) === JSON.stringify(b); if (!ok) { fail++; console.log('FAIL', m, '\n  got ', JSON.stringify(a), '\n  want', JSON.stringify(b)); } else console.log('ok  ', m); };
@@ -113,6 +113,10 @@ eq(T.ackText_({ status: 'DONE', kind: 'tax_invoice', supplierName: 'เจสต
   '✅ เก็บแล้ว: ใบกำกับภาษี เจสตาร์\nIV02691100045 · 12,400 บาท\nจับคู่แล้ว', 'ตอบรับ: อ่านสำเร็จ');
 eq(/กำลังอ่าน/.test(T.ackText_(undefined)), true, 'ตอบรับ: ยังไม่ได้อ่าน');
 eq(/ไม่ใช่เอกสาร/.test(T.ackText_({ status: 'SKIP' })), true, 'ตอบรับ: ไม่ใช่เอกสาร');
+eq(T.ackText_({ status: 'DONE', kind: 'tax_invoice', supplierName: 'เจสตาร์', no: 'IV02691100045', total: 12400, result: 'จับคู่แล้ว' }, 'key'),
+  '✅ เก็บใบกำกับภาษีแล้ว · IV02691100045 · 12,400 บาท', 'ตอบรับกลุ่มซัพฯ: ใบกำกับ บรรทัดเดียว');
+eq([T.ackText_(undefined, 'key'), T.ackText_({ status: 'DONE', kind: 'transfer_slip', no: 'X', total: 5 }, 'key'), T.ackText_({ status: 'SKIP' }, 'key')], ['', '', ''], 'ตอบรับกลุ่มซัพฯ: กรณีอื่นเงียบ');
+eq([T.ackMode_('ไม่ตอบ'), T.ackMode_(''), T.ackMode_('เฉพาะเอกสารสำคัญ'), T.ackMode_('ทุกไฟล์'), T.ackMode_(true)], ['', '', 'key', 'all', 'all'], 'โหมดตอบรับ');
 
 console.log(fail ? '\n' + fail + ' รายการไม่ผ่าน' : '\nผ่านทั้งหมด');
 process.exit(fail ? 1 : 0);

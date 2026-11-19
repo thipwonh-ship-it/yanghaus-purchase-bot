@@ -46,7 +46,7 @@ const BILL_HEAD = ['คีย์', 'ซัพพลายเออร์', 'ว�
 const QUEUE_HEAD = ['เวลารับ', 'แหล่ง', 'ซัพพลายเออร์', 'ผู้ส่ง', 'ชนิดข้อความ', 'messageId', 'fileId', 'สถานะ',
   'ชนิดเอกสาร', 'ผู้ขาย', 'เลขที่', 'วันที่เอกสาร', 'อ้างอิง', 'ยอด', 'VAT', 'ผลจับคู่', 'ลิงก์', 'ลองแล้ว', 'ข้อผิดพลาด'];
 const TEXT_HEAD = ['เวลา', 'แหล่ง', 'ซัพพลายเออร์', 'ผู้ส่ง', 'ข้อความ'];
-const CFG_HEAD = ['id (groupId/userId)', 'ชนิด', 'ซัพพลายเออร์ (JSTAR/PRR/RRL/YTL/AUTO)', 'ชื่อ', 'เปิดใช้', 'เก็บข้อความ (all/keyword/none)', 'หมายเหตุ', 'พบครั้งแรก', 'ตอบรับในแชท'];
+const CFG_HEAD = ['id (groupId/userId)', 'ชนิด', 'ซัพพลายเออร์ (JSTAR/PRR/RRL/YTL/AUTO)', 'ชื่อ', 'เปิดใช้', 'เก็บข้อความ (all/keyword/none)', 'หมายเหตุ', 'พบครั้งแรก', 'ตอบรับในแชท (ไม่ตอบ/เฉพาะเอกสารสำคัญ/ทุกไฟล์)'];
 const FOLLOW_HEAD = ['วันที่', 'ซัพพลายเออร์', 'ประเภท', 'รายละเอียด', 'ข้อความสำเร็จรูป'];
 
 /* =====================================================================
@@ -323,8 +323,22 @@ function buildFollowups_(bills, today, lastJstarReport) {
 const KIND_TAG = { tax_invoice: 'ใบกำกับภาษี', delivery_note: 'ใบส่งสินค้า', receipt: 'ใบเสร็จ', outstanding_report: 'รายงานบิลค้าง', sales_order: 'ใบสั่งขาย',
   quotation: 'ใบเสนอราคา', order_ack: 'ใบรับจอง', credit_request: 'ใบขอวงเงิน', transfer_slip: 'สลิปโอน', platform_order: 'ออเดอร์' };
 
-/* ข้อความตอบรับ 1 เอกสาร — r = ผลจาก processRows_ (undefined = ยังไม่ได้อ่าน) */
-function ackText_(r) {
+/* คอลัมน์ ตอบรับในแชท → '' (ไม่ตอบ) | 'key' (เฉพาะ ใบกำกับ/ใบเสร็จ/ใบส่งสินค้า ที่อ่านสำเร็จ) | 'all' (ทุกไฟล์) */
+function ackMode_(v) {
+  const t = String(v === true ? 'TRUE' : v || '').trim();
+  if (/สำคัญ/.test(t)) return 'key';
+  if (t.toUpperCase() === 'TRUE' || /ทุก/.test(t)) return 'all';
+  return '';
+}
+const KEY_KINDS = ['tax_invoice', 'receipt', 'delivery_note'];
+
+/* ข้อความตอบรับ 1 เอกสาร — r = ผลจาก processRows_ (undefined = ยังไม่ได้อ่าน) · คืน '' = ไม่ต้องตอบ
+ * โหมด key (กลุ่มซัพพลายเออร์): บรรทัดเดียว เฉพาะ 3 เอกสารสำคัญ ไม่บอกสถานะจับคู่ ไม่ตอบกรณีอื่นเลย */
+function ackText_(r, mode) {
+  if (mode === 'key') {
+    if (!r || r.status !== 'DONE' || KEY_KINDS.indexOf(r.kind) < 0) return '';
+    return ['✅ เก็บ' + KIND_TAG[r.kind] + 'แล้ว', r.no, num_(r.total) ? fmtMoney_(r.total) + ' บาท' : ''].filter(String).join(' · ');
+  }
   if (!r) return '📥 รับไฟล์แล้ว 1 ไฟล์ กำลังอ่าน (ดูผลได้ในแท็บ บอท-คิว ภายใน 5 นาที)';
   if (r.status === 'SKIP') return 'ℹ️ ไฟล์นี้ไม่ใช่เอกสารซื้อ ไม่ได้เก็บ';
   if (r.status !== 'DONE') return '📥 รับไฟล์แล้ว แต่ยังอ่านไม่สำเร็จ จะลองใหม่ในรอบถัดไป (5 นาที)';
@@ -376,7 +390,7 @@ function readCfg_(ss) {
     if (!v[i][0]) continue;
     map[String(v[i][0])] = { row: i + 1, type: v[i][1], supplier: String(v[i][2] || '').toUpperCase().trim(), name: v[i][3],
       on: v[i][4] === true || String(v[i][4]).toUpperCase() === 'TRUE', text: String(v[i][5] || 'keyword').toLowerCase().trim(),
-      ack: v[i][8] === true || String(v[i][8]).toUpperCase() === 'TRUE' };
+      ack: ackMode_(v[i][8]) };
   }
   return map;
 }
@@ -397,10 +411,10 @@ function registerSource_(ss, cfg, ev) {
   const sh = ss.getSheetByName(TAB_CFG);
   const row = nextRow_(sh);
   /* ตอบรับในแชท: กลุ่ม = ปิดไว้ก่อน (กลุ่มซัพพลายเออร์ห้ามบอทพูด) · แชท 1:1 = เปิด */
-  sh.getRange(row, 1, 1, 9).setValues([[id, isGroup ? 'group' : 'user', isGroup ? '' : 'AUTO', name, false, isGroup ? 'keyword' : 'none', 'ใหม่ — เลือกซัพพลายเออร์แล้วติ๊กเปิดใช้', now_(), !isGroup]]);
+  sh.getRange(row, 1, 1, 9).setValues([[id, isGroup ? 'group' : 'user', isGroup ? '' : 'AUTO', name, false, isGroup ? 'keyword' : 'none', 'ใหม่ — เลือกซัพพลายเออร์แล้วติ๊กเปิดใช้', now_(), isGroup ? 'ไม่ตอบ' : 'ทุกไฟล์']]);
   sh.getRange(row, 5).insertCheckboxes();
-  sh.getRange(row, 9).insertCheckboxes();
-  cfg[id] = { row: row, type: isGroup ? 'group' : 'user', supplier: '', name: name, on: false, text: 'none', ack: false };
+  sh.getRange(row, 9).setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['ไม่ตอบ', 'เฉพาะเอกสารสำคัญ', 'ทุกไฟล์'], true).build());
+  cfg[id] = { row: row, type: isGroup ? 'group' : 'user', supplier: '', name: name, on: false, text: 'none', ack: '' };
 }
 
 function handleEvent_(ss, cfg, ev, acks) {
@@ -436,7 +450,7 @@ function handleEvent_(ss, cfg, ev, acks) {
   } catch (e2) { status = 'ERR'; err = String(e2).slice(0, 200); }
   const qRow = nextRow_(q);
   q.getRange(qRow, 1, 1, 19).setValues([[when, src.name, src.supplier, sender, m.type, String(m.id), fileId, status, '', '', '', '', '', '', '', '', '', 0, err]]);
-  if (src.ack && acks && ev.replyToken) acks.push({ row: qRow, token: ev.replyToken, ok: status === 'NEW' });
+  if (src.ack && acks && ev.replyToken) acks.push({ row: qRow, token: ev.replyToken, ok: status === 'NEW', mode: src.ack });
 }
 
 /* ตอบรับในแชท (เฉพาะแหล่งที่ติ๊ก "ตอบรับในแชท") — ใช้ reply ซึ่งไม่นับโควต้า และ reply token ใช้ได้ครั้งเดียวภายใน ~1 นาที
@@ -452,7 +466,10 @@ function ackNow_(acks, started) {
     } catch (err) { console.error('ackNow ' + err); } finally { lock.releaseLock(); }
   }
   acks.forEach(function (a) {
-    try { replyText_(a.token, a.ok ? ackText_(res[a.row]) : '⚠️ รับไฟล์จาก LINE ไม่สำเร็จ รบกวนส่งใหม่อีกครั้งค่ะ'); } catch (err) { console.error('reply ' + err); }
+    try {
+      const text = a.ok ? ackText_(res[a.row], a.mode) : (a.mode === 'all' ? '⚠️ รับไฟล์จาก LINE ไม่สำเร็จ รบกวนส่งใหม่อีกครั้งค่ะ' : '');
+      if (text) replyText_(a.token, text);
+    } catch (err) { console.error('reply ' + err); }
   });
 }
 
