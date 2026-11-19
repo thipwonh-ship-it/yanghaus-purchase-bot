@@ -616,7 +616,8 @@ const DOC_PROMPT =
   'ref_no (the number printed in the "อ้างอิง" or "เลขที่สั่งของลูกค้า" field if any, exactly as printed, else empty),\n' +
   'total (grand total / amount transferred, number), vat (VAT amount, number, 0 if none),\n' +
   'lines (ONLY for receipt and outstanding_report: array of {doc_no, doc_date (YYYY-MM-DD), amount (original bill amount), paid (amount paid on this receipt; for outstanding_report use 0)} — one per listed bill; otherwise []),\n' +
-  'items (short Thai summary of goods, max 80 chars), confidence (0-1).\n' +
+  'items (short Thai summary of goods, max 80 chars; for platform_order instead list EVERY product line as "ชื่อสินค้าแบบย่อ (รุ่น ขนาด) / ตัวเลือกสินค้า xจำนวน" separated by "; ", max 300 chars, and do NOT include the recipient name, phone or address), confidence (0-1).\n' +
+  'For platform_order (Shopee/TikTok/Lazada shipping label or order sheet): doc_no = the platform order number (e.g. Shopee Order No.), seller = the platform name, doc_date = ship-by date or order date, total = 0 if no price is printed.\n' +
   'Read digits carefully; do not guess unreadable digits — put what you can read.';
 
 function geminiModels_(key) {
@@ -814,6 +815,8 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
         else if (prev.link) plan.push({ trashLink: prev.link });
       } else {
         result = applyDoc_(bills, doc, supplier, link);
+        /* ใบออเดอร์แพลตฟอร์ม (ใบปะหน้า Shopee/TikTok ที่ส่งให้ซัพพลายเออร์จัดส่งแทน): เก็บรายการสินค้าไว้ในผลจับคู่ ใช้ร่างสรุปยอดรุ่งเรือง */
+        if (kind === 'platform_order' && doc.items) result = 'ออเดอร์: ' + String(doc.items).slice(0, 300);
         if (copy) { result += ' · สำเนา'; bills.forEach(function (b) { if (b.supplier === supplier && b.invNo === no) { addNote_(b, COPY_NOTE); b._dirty = true; } }); }
       }
       const pl = { row: row, file: file, doc: doc, supplier: supplier, kind: kind, no: no, isDup: isDup, link: link, result: result, tries: tries, received: v[i][0] };
@@ -892,8 +895,17 @@ function draftRrlSummary_(ss, today) {
   const prevCut = Utilities.formatDate(new Date(prevEnd.getTime() - 3 * 86400000), 'UTC', 'yyyy-MM-dd');
   const lines = [];
   for (let i = 1; i < v.length; i++) if (v[i][2] === 'RRL' && v[i][0].slice(0, 10) > prevCut && v[i][0].slice(0, 10) <= today) lines.push(v[i][0] + ' | ' + v[i][3].slice(-6) + ' | ' + v[i][4]);
+  /* ใบออเดอร์ Shopee/TikTok ที่ส่งเป็นรูป/PDF ในกลุ่ม = คำสั่งให้ซัพพลายเออร์ส่งของให้ลูกค้า → นับเป็นรายการสั่งด้วย */
+  const q = ss.getSheetByName(TAB_QUEUE).getDataRange().getDisplayValues();
+  for (let i = 1; i < q.length; i++) {
+    if (q[i][2] !== 'RRL' || q[i][7] !== 'DONE' || q[i][8] !== 'platform_order' || !/^ออเดอร์: /.test(q[i][15])) continue;
+    const d0 = q[i][0].slice(0, 10);
+    if (d0 > prevCut && d0 <= today) lines.push(q[i][0] + ' | ORDER-SHEET ' + q[i][10] + ' | ' + q[i][15].replace(/^ออเดอร์: /, ''));
+  }
+  lines.sort();
   if (!lines.length) return '';
   const prompt = 'Below is a LINE group chat log between a tire shop (buyer) and supplier รุ่งเรืองล้อแม็ค. Each line: time | sender id | text. ' +
+    'Lines whose sender is "ORDER-SHEET <order no>" are platform order sheets (Shopee/TikTok shipping labels) the buyer posted so the supplier ships that product to the end customer: count each as an ordered item (treat as delivered unless the chat says it was cancelled or out of stock), keep its quantity as printed, and do not list it twice if the chat text mentions the same order. ' +
     'List ONLY items the buyer actually ordered AND that were confirmed delivered or picked up (e.g. supplier says จัดส่งเรียบร้อย, buyer says รับแล้ว/ไปรับ). ' +
     'Ignore stock questions (มีไหม), items answered ไม่มี/หมด, and cancelled items. ' +
     'Return ONLY JSON: {"lines":["D/M/YY ยี่ห้อ ขนาด จำนวน", ...], "unsure":["short Thai note about anything ambiguous", ...]} ' +
