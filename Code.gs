@@ -324,7 +324,8 @@ function prop_(k) { return PropertiesService.getScriptProperties().getProperty(k
 function ss_() { return SpreadsheetApp.openById(SHEET_ID); }
 function now_() { return Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd HH:mm:ss'); }
 function today_() { return Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd'); }
-function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
+// ใช้ HtmlService เพราะ ContentService ตอบ 302 redirect ซึ่ง LINE ถือว่า error (ต้องได้ 200 ตรง ๆ)
+function json_(o) { return HtmlService.createHtmlOutput(JSON.stringify(o)); }
 function getOrCreate_(parent, name) { const it = parent.getFoldersByName(name); return it.hasNext() ? it.next() : parent.createFolder(name); }
 function nextRow_(sh) {
   const a = sh.getRange('A:A').getValues(); let last = 0;
