@@ -366,17 +366,17 @@ function buildFollowups_(bills, today, lastJstarReport) {
 const KIND_TAG = { tax_invoice: 'ใบกำกับภาษี', delivery_note: 'ใบส่งสินค้า', receipt: 'ใบเสร็จ', outstanding_report: 'รายงานบิลค้าง', sales_order: 'ใบสั่งขาย',
   quotation: 'ใบเสนอราคา', order_ack: 'ใบรับจอง', credit_request: 'ใบขอวงเงิน', transfer_slip: 'สลิปโอน', platform_order: 'ออเดอร์' };
 
-/* คอลัมน์ ตอบรับในแชท → '' (ไม่ตอบ) | 'key' (เฉพาะ ใบกำกับ/ใบเสร็จ/ใบส่งสินค้า ที่อ่านสำเร็จ) | 'all' (ทุกไฟล์) */
+/* คอลัมน์ ตอบรับในแชท → '' (ไม่ตอบ) | 'key' (เฉพาะ ใบกำกับภาษี/ใบเสร็จรับเงิน ที่อ่านสำเร็จ) | 'all' (ทุกไฟล์) */
 function ackMode_(v) {
   const t = String(v === true ? 'TRUE' : v || '').trim();
   if (/สำคัญ/.test(t)) return 'key';
   if (t.toUpperCase() === 'TRUE' || /ทุก/.test(t)) return 'all';
   return '';
 }
-const KEY_KINDS = ['tax_invoice', 'receipt', 'delivery_note'];
+const KEY_KINDS = ['tax_invoice', 'receipt'];      // Thipwon 19 พ.ย.: ในกลุ่มซัพพลายเออร์ตอบแค่ ใบกำกับภาษี กับ ใบเสร็จรับเงิน
 
 /* ข้อความตอบรับ "ข้อความเดียว" สำหรับเอกสารที่ส่งมาชุดเดียวกัน — items = [{status, kind, no, result}] · คืน '' = ไม่ต้องตอบ
- * แจ้งแค่ชนิด + เลขที่เอกสาร (ไม่แจ้งยอดเงิน) · โหมด key: เฉพาะ ใบกำกับ/ใบเสร็จ/ใบส่งสินค้า ที่อ่านสำเร็จ กรณีอื่นเงียบ */
+ * แจ้งแค่ชนิด + เลขที่เอกสาร (ไม่แจ้งยอดเงิน) · โหมด key: เฉพาะ ใบกำกับภาษี/ใบเสร็จรับเงิน ที่อ่านสำเร็จ กรณีอื่นเงียบ */
 function ackSummary_(items, mode) {
   const done = items.filter(function (r) { return r.status === 'DONE'; });
   const kinds = KEY_KINDS.slice();
