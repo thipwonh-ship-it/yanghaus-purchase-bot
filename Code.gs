@@ -26,7 +26,7 @@ const TAB_FOLLOW = 'ตามใบกำกับ';
 const INBOX_NAME = '_YH-Purchase-inbox';
 const SUB_VAT = 'ภาษีซื้อ';
 const SUB_DOCS = 'เอกสารซื้อ';
-const BATCH = 8;            // เอกสารต่อรอบ (รอบละ 5 นาที)
+const BATCH = 12;           // เอกสารต่อรอบ (รอบละ 5 นาที)
 const MAX_TRIES = 3;
 
 /* ซัพพลายเออร์: key → ชื่อโฟลเดอร์/ชื่อสั้น + วิธีจำจากเอกสาร */
@@ -389,7 +389,8 @@ function ackSummary_(items, mode) {
   const wait = items.filter(function (r) { return r.status !== 'DONE' && r.status !== 'SKIP'; }).length;
   if (mode === 'all' && skip) lines.push('ℹ️ ไม่ใช่เอกสาร ' + skip + ' ไฟล์ (ไม่ได้เก็บ)');
   /* โหมด key: บอกจำนวนที่ยังอ่านไม่เสร็จเฉพาะเมื่อมีบรรทัดเก็บแล้วอยู่ด้วย — ไม่งั้นส่ง 15 ใบแล้วบอทตอบ "4 ใบ" คนจะคิดว่าที่เหลือหาย */
-  if (wait && (mode === 'all' || lines.length)) lines.push('📥 อีก ' + wait + ' ไฟล์รับแล้ว กำลังอ่านต่อ (ไม่แจ้งซ้ำ)');
+  if (wait && (mode === 'all' || lines.length)) lines.push('📥 อีก ' + wait + ' ไฟล์รับแล้ว กำลังอ่านต่อ');
+  if (lines.length) lines.push('🙏 ยางเฮ้าส์ ขอบคุณค่ะ');
   return lines.join('\n');
 }
 
@@ -515,55 +516,57 @@ function handleEvent_(ss, cfg, ev, acks) {
 }
 
 /* ตอบรับในแชท — รวมเอกสารที่ส่งมาชุดเดียวกันเป็น "ข้อความเดียว"
- * LINE ส่งรูปแต่ละใบมาเป็น webhook แยกกัน → ทุก webhook ฝาก replyToken ไว้ในคิว แล้วตัวที่ได้ user lock เป็น "ผู้รวม":
- * อ่านเอกสารที่รอ (พร้อมกันหลายใบ) → รอ 2 วินาทีเผื่อใบที่ตามมา → ไม่มีเพิ่มแล้วจึงตอบครั้งเดียวด้วย token ใหม่สุด
- * (reply ไม่นับโควต้า · token ใช้ได้ครั้งเดียวภายใน ~1 นาที จึงมีงบรวม 45 วินาที ที่อ่านไม่ทันปล่อยให้ processQueue อ่านต่อโดยไม่ตอบ) */
+ * LINE ส่งรูปแต่ละใบมาเป็น webhook แยกกัน → ทุก webhook ฝาก replyToken ไว้ในคิว (คอลัมน์ 20) แล้วตัวที่ได้ user lock เป็น "ผู้รวม":
+ * 1) รอจนไม่มีใบใหม่เข้ามา 2 วินาที (ไม่เกิน 10 วินาที)  2) อ่านทุกใบพร้อมกัน  3) ตอบครั้งเดียวทันทีที่อ่านเสร็จ  4) ค่อยย้ายไฟล์/เขียนชีท
+ * reply ไม่นับโควต้า · token ใช้ได้ครั้งเดียวภายใน ~1 นาที → ใบที่อ่านไม่ทันจะถูกนับเป็น "กำลังอ่านต่อ" แล้ว processQueue อ่านให้ในรอบ 5 นาที */
+const ACK_MAX = 20;
 function ackCollect_() {
   const lock = LockService.getUserLock();
-  if (!lock.tryLock(20000)) return;                              // มีผู้รวมทำงานอยู่ — เขาจะเห็นแถวของเราเอง
+  if (!lock.tryLock(25000)) return;                              // มีผู้รวมทำงานอยู่ — เขาจะเห็นแถวของเราเอง
   try {
     const ss = ss_(), q = ss.getSheetByName(TAB_QUEUE);
-    const hardStop = Date.now() + 45000, tried = {};
-    let idle = 0;
-    while (Date.now() < hardStop) {
+    const t0 = Date.now();
+    let pend = [], last = -1, stable = 0;
+    while (Date.now() - t0 < 10000) {
       SpreadsheetApp.flush();
-      const v = q.getDataRange().getDisplayValues();
-      const rows = [];
-      let pending = 0;
-      for (let i = 1; i < v.length; i++) {
-        if (!v[i][19]) continue;
-        pending++;
-        if (v[i][7] === 'NEW' && v[i][6] && !tried[i + 1] && rows.length < BATCH) { rows.push(i + 1); tried[i + 1] = true; }
-      }
-      if (!pending) return;
-      if (rows.length) { processRows_(ss, rows, hardStop); idle = 0; continue; }
-      if (++idle >= 2) break;
-      Utilities.sleep(2000);
+      pend = pendingAcks_(q);
+      if (!pend.length) return;
+      if (pend.length === last) { if (++stable >= 2) break; } else { stable = 0; last = pend.length; }
+      Utilities.sleep(1000);
     }
-    sendAcks_(q);
+    let sent = false;
+    const send = function (res) {
+      if (sent) return; sent = true;
+      const now = Date.now(), groups = {};
+      pend.forEach(function (p) {
+        const g = groups[p.source] || (groups[p.source] = { mode: p.mode, ms: 0, token: '', items: [] });
+        if (p.ms > g.ms) { g.ms = p.ms; g.token = p.token; }
+        g.items.push(res[p.row] || { status: p.status === 'NEW' ? 'NEW' : p.status, kind: p.kind, no: p.no, result: p.result });
+      });
+      for (const name in groups) {
+        const g = groups[name];
+        try { const text = ackSummary_(g.items, g.mode); if (text && g.token && now - g.ms < 55000) replyText_(g.token, text); }
+        catch (err) { console.error('reply ' + err); }
+      }
+    };
+    const rows = pend.filter(function (p) { return p.status === 'NEW' && p.fileId; }).map(function (p) { return p.row; }).slice(0, ACK_MAX);
+    try { if (rows.length) processRows_(ss, rows, t0 + 40000, send); } finally {
+      send({});                                                   // ไม่มีอะไรให้อ่าน หรืออ่านล้มทั้งชุด ก็ยังตอบตามสถานะที่มี
+      pend.forEach(function (p) { q.getRange(p.row, 20).setValue(''); });
+    }
   } catch (err) { console.error('ackCollect ' + err); } finally { lock.releaseLock(); }
 }
 
-function sendAcks_(q) {
-  SpreadsheetApp.flush();
-  const v = q.getDataRange().getDisplayValues();
-  const now = Date.now(), groups = {};
+/* แถวในคิวที่ยังรอตอบรับ (ทิ้งของค้างเกิน 90 วินาที เช่นสคริปต์ล่มรอบก่อน) */
+function pendingAcks_(q) {
+  const v = q.getDataRange().getDisplayValues(), now = Date.now(), out = [];
   for (let i = 1; i < v.length; i++) {
     if (!v[i][19]) continue;
-    q.getRange(i + 1, 20).setValue('');                          // ล้างทุกแถวที่รอ ไม่ว่าจะได้ตอบหรือไม่
     const p = String(v[i][19]).split('|'), ms = +p[1];
-    if (now - ms > 90000) continue;                              // ค้างจากรอบก่อน (เช่นสคริปต์ล่ม) ไม่เอามารวม
-    const g = groups[v[i][1]] || (groups[v[i][1]] = { mode: p[0], ms: 0, token: '', items: [] });
-    if (ms > g.ms) { g.ms = ms; g.token = p.slice(2).join('|'); }
-    g.items.push({ status: v[i][7], kind: v[i][8], no: v[i][10], result: v[i][15] });
+    if (now - ms > 90000) { q.getRange(i + 1, 20).setValue(''); continue; }
+    out.push({ row: i + 1, source: v[i][1], mode: p[0], ms: ms, token: p.slice(2).join('|'), status: v[i][7], fileId: v[i][6], kind: v[i][8], no: v[i][10], result: v[i][15] });
   }
-  for (const name in groups) {
-    const g = groups[name];
-    try {
-      const text = ackSummary_(g.items, g.mode);
-      if (text && g.token && now - g.ms < 55000) replyText_(g.token, text);
-    } catch (err) { console.error('reply ' + err); }
-  }
+  return out;
 }
 
 function replyText_(token, text) {
@@ -737,54 +740,64 @@ function processQueue() {
 }
 
 /* อ่านเอกสารในคิว — onlyRows = เลขแถวที่ต้องการ (ตอบรับทันที) หรือ null = แถว NEW ทั้งหมดไม่เกิน BATCH
- * deadline = เวลา (ms) ที่ต้องหยุดเริ่มเอกสารใหม่ · 0 = ไม่จำกัด · ผู้เรียกต้องถือ user lock อยู่แล้ว
+ * deadline = เวลา (ms) ที่ต้องหยุดอ่านใบใหม่ · 0 = ไม่จำกัด · ผู้เรียกต้องถือ user lock อยู่แล้ว
+ * afterRead(out) = เรียกทันทีที่ "อ่าน + จับคู่ในหน่วยความจำ" เสร็จ ก่อนย้ายไฟล์/เขียนชีท (ส่วนที่ช้า) — ใช้ส่งข้อความตอบรับให้ทัน
  * คืน { เลขแถว: {status, kind, supplierName, no, total, result} } */
-function processRows_(ss, onlyRows, deadline) {
+function processRows_(ss, onlyRows, deadline, afterRead) {
   const out = {};
   const q = ss.getSheetByName(TAB_QUEUE);
   const v = q.getDataRange().getDisplayValues();
-  const todo = [];
-  for (let i = 1; i < v.length && todo.length < BATCH; i++) {
+  const todo = [], cap = onlyRows ? ACK_MAX : BATCH;
+  for (let i = 1; i < v.length && todo.length < cap; i++) {
     if (v[i][7] !== 'NEW' || !v[i][6]) continue;
     if (onlyRows && onlyRows.indexOf(i + 1) < 0) continue;
     todo.push(i);
   }
-  if (!todo.length) return out;
+  if (!todo.length) { if (afterRead) afterRead(out); return out; }
   const bills = readBills_(ss);
   const seen = {};                                             // กันเอกสารซ้ำ: ซัพพลายเออร์ + ชนิด + เลขที่
   for (let i = 1; i < v.length; i++) if (v[i][7] === 'DONE' && v[i][10]) seen[v[i][2] + '|' + v[i][8] + '|' + v[i][10]] = true;
 
-  /* หลายใบ → อ่านพร้อมกันก่อน (เร็วกว่าอ่านทีละใบหลายเท่า) ใบที่ไม่สำเร็จค่อยอ่านเดี่ยวในลูปด้านล่าง */
+  /* ขั้น A — อ่าน: หลายใบอ่านพร้อมกันก่อน ใบที่ไม่สำเร็จค่อยอ่านเดี่ยว แล้วจับคู่ในหน่วยความจำ (ยังไม่แตะ Drive/ชีท) */
   const files = todo.map(function (i) { try { return DriveApp.getFileById(v[i][6]); } catch (e) { return null; } });
   const pre = todo.length > 1 ? readDocsParallel_(files) : [];
-
+  const plan = [];
   todo.forEach(function (i, k) {
-    if (deadline && Date.now() > deadline) return;
     const row = i + 1, tries = num_(v[i][17]) + 1;
+    if (!pre[k] && deadline && Date.now() > deadline) return;      // หมดเวลา: ปล่อยเป็น NEW ให้รอบถัดไป
     try {
       const file = files[k] || DriveApp.getFileById(v[i][6]);
       const doc = pre[k] || readDoc_(file) || {};
-      if (!doc.is_document) { file.setTrashed(true); q.getRange(row, 8, 1, 2).setValues([['SKIP', 'ไม่ใช่เอกสาร']]); out[row] = { status: 'SKIP' }; return; }
+      if (!doc.is_document) { plan.push({ row: row, file: file, skip: true }); out[row] = { status: 'SKIP' }; return; }
       let supplier = String(v[i][2] || '').toUpperCase();
       if (!SUPPLIERS[supplier] || supplier === 'OTHER') supplier = detectSupplier_(doc);   // AUTO (แชท 1:1) → ดูจากผู้ขาย/ผู้รับโอน
       const kind = docKind_(doc);
       const no = normDocNo_(doc.doc_no);
       const dupKey = supplier + '|' + kind + '|' + no;
-      const isDup = no && seen[dupKey];
-      /* เอกสารซ้ำ (เลขที่เดิม ชนิดเดิม ซัพพลายเออร์เดิม): ไม่เก็บไฟล์ซ้ำใน Drive ทิ้งลงถังขยะ */
-      let link = '';
-      if (isDup) file.setTrashed(true); else link = fileAway_(file, doc, supplier, kind, v[i][0]);
+      const isDup = !!(no && seen[dupKey]);
+      const link = isDup ? '' : file.getUrl();                     // ลิงก์ไฟล์ไม่เปลี่ยนเมื่อย้าย/เปลี่ยนชื่อ
       const result = isDup ? 'ซ้ำ: เคยลงแล้ว' : applyDoc_(bills, doc, supplier, link);
       seen[dupKey] = true;
-      q.getRange(row, 3).setValue(supplier);
-      q.getRange(row, 8, 1, 12).setValues([['DONE', kind, doc.seller || doc.payee || '', no, doc.doc_date || '', normDocNo_(doc.ref_no),
-        num_(doc.total) || '', num_(doc.vat) || '', result, link, tries, '']]);
+      plan.push({ row: row, file: file, doc: doc, supplier: supplier, kind: kind, no: no, isDup: isDup, link: link, result: result, tries: tries, received: v[i][0] });
       out[row] = { status: 'DONE', kind: kind, supplierName: SUPPLIERS[supplier].name, no: no, total: num_(doc.total), result: result };
     } catch (err) {
-      q.getRange(row, 8).setValue(tries >= MAX_TRIES ? 'ERR' : 'NEW');
-      q.getRange(row, 18, 1, 2).setValues([[tries, String(err).slice(0, 200)]]);
+      plan.push({ row: row, err: String(err).slice(0, 200), tries: tries });
       out[row] = { status: 'ERR' };
     }
+  });
+  if (afterRead) { try { afterRead(out); } catch (e) { console.error('afterRead ' + e); } }
+
+  /* ขั้น B — เก็บ: ย้ายไฟล์เข้าโฟลเดอร์เดือน เขียนคิว เขียนทะเบียน (ถ้าล่มกลางทาง แถวยังเป็น NEW รอบถัดไปทำซ้ำได้) */
+  plan.forEach(function (p) {
+    try {
+      if (p.err) { q.getRange(p.row, 8).setValue(p.tries >= MAX_TRIES ? 'ERR' : 'NEW'); q.getRange(p.row, 18, 1, 2).setValues([[p.tries, p.err]]); return; }
+      if (p.skip) { p.file.setTrashed(true); q.getRange(p.row, 8, 1, 2).setValues([['SKIP', 'ไม่ใช่เอกสาร']]); return; }
+      /* เอกสารซ้ำ (เลขที่เดิม ชนิดเดิม ซัพพลายเออร์เดิม): ไม่เก็บไฟล์ซ้ำใน Drive ทิ้งลงถังขยะ */
+      if (p.isDup) p.file.setTrashed(true); else fileAway_(p.file, p.doc, p.supplier, p.kind, p.received);
+      q.getRange(p.row, 3).setValue(p.supplier);
+      q.getRange(p.row, 8, 1, 12).setValues([['DONE', p.kind, p.doc.seller || p.doc.payee || '', p.no, p.doc.doc_date || '', normDocNo_(p.doc.ref_no),
+        num_(p.doc.total) || '', num_(p.doc.vat) || '', p.result, p.link, p.tries, '']]);
+    } catch (err) { console.error('store row ' + p.row + ' ' + err); }
   });
   writeBills_(ss, bills);
   return out;
