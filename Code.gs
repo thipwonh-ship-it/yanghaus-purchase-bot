@@ -46,7 +46,7 @@ const BILL_HEAD = ['คีย์', 'ซัพพลายเออร์', 'ว�
 const QUEUE_HEAD = ['เวลารับ', 'แหล่ง', 'ซัพพลายเออร์', 'ผู้ส่ง', 'ชนิดข้อความ', 'messageId', 'fileId', 'สถานะ',
   'ชนิดเอกสาร', 'ผู้ขาย', 'เลขที่', 'วันที่เอกสาร', 'อ้างอิง', 'ยอด', 'VAT', 'ผลจับคู่', 'ลิงก์', 'ลองแล้ว', 'ข้อผิดพลาด', 'รอตอบรับ (ระบบใช้ชั่วคราว)'];
 const TEXT_HEAD = ['เวลา', 'แหล่ง', 'ซัพพลายเออร์', 'ผู้ส่ง', 'ข้อความ'];
-const CFG_HEAD = ['id (groupId/userId)', 'ชนิด', 'ซัพพลายเออร์ (JSTAR/PRR/RRL/YTL/AUTO)', 'ชื่อ', 'เปิดใช้', 'เก็บข้อความ (all/keyword/none)', 'หมายเหตุ', 'พบครั้งแรก', 'ตอบรับในแชท (ไม่ตอบ/เฉพาะเอกสารสำคัญ/ทุกไฟล์)'];
+const CFG_HEAD = ['id (groupId/userId)', 'ชนิด', 'ซัพพลายเออร์ (JSTAR/PRR/RRL/YTL/AUTO)', 'ชื่อ', 'เปิดใช้', 'เก็บข้อความ (all/keyword/none)', 'หมายเหตุ', 'พบครั้งแรก', 'ตอบรับในแชท (ไม่ตอบ/เฉพาะเอกสารสำคัญ/ทุกไฟล์)', 'รับแจ้งเตือน (เฉพาะแชทส่วนตัว)'];
 const FOLLOW_HEAD = ['วันที่', 'ซัพพลายเออร์', 'ประเภท', 'รายละเอียด', 'ข้อความสำเร็จรูป'];
 
 /* =====================================================================
@@ -442,7 +442,8 @@ function readCfg_(ss) {
     if (!v[i][0]) continue;
     map[String(v[i][0])] = { row: i + 1, type: v[i][1], supplier: String(v[i][2] || '').toUpperCase().trim(), name: v[i][3],
       on: v[i][4] === true || String(v[i][4]).toUpperCase() === 'TRUE', text: String(v[i][5] || 'keyword').toLowerCase().trim(),
-      ack: ackMode_(v[i][8]) };
+      ack: ackMode_(v[i][8]),
+      alert: v[i][9] === true || String(v[i][9]).toUpperCase() === 'TRUE' };
   }
   return map;
 }
@@ -468,10 +469,11 @@ function registerSourceLocked_(ss, cfg, ev, id) {
   const sh = ss.getSheetByName(TAB_CFG);
   const row = nextRow_(sh);
   /* ตอบรับในแชท: กลุ่ม = ปิดไว้ก่อน (กลุ่มซัพพลายเออร์ห้ามบอทพูด) · แชท 1:1 = เปิด */
-  sh.getRange(row, 1, 1, 9).setValues([[id, isGroup ? 'group' : 'user', isGroup ? '' : 'AUTO', name, false, isGroup ? 'keyword' : 'none', 'ใหม่ — เลือกซัพพลายเออร์แล้วติ๊กเปิดใช้', now_(), isGroup ? 'ไม่ตอบ' : 'ทุกไฟล์']]);
+  sh.getRange(row, 1, 1, 10).setValues([[id, isGroup ? 'group' : 'user', isGroup ? '' : 'AUTO', name, false, isGroup ? 'keyword' : 'none', 'ใหม่ — เลือกซัพพลายเออร์แล้วติ๊กเปิดใช้', now_(), isGroup ? 'ไม่ตอบ' : 'ทุกไฟล์', isGroup ? '' : false]]);
   sh.getRange(row, 5).insertCheckboxes();
+  if (!isGroup) sh.getRange(row, 10).insertCheckboxes();
   sh.getRange(row, 9).setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['ไม่ตอบ', 'เฉพาะเอกสารสำคัญ', 'ทุกไฟล์'], true).build());
-  cfg[id] = { row: row, type: isGroup ? 'group' : 'user', supplier: '', name: name, on: false, text: 'none', ack: '' };
+  cfg[id] = { row: row, type: isGroup ? 'group' : 'user', supplier: '', name: name, on: false, text: 'none', ack: '', alert: false };
 }
 
 function handleEvent_(ss, cfg, ev, acks) {
@@ -504,7 +506,10 @@ function handleEvent_(ss, cfg, ev, acks) {
     blob.setName(when.replace(/[: ]/g, '-') + '_' + (src.supplier || 'NA') + '_' + m.id + '.' + ext);
     const inbox = getOrCreate_(DriveApp.getFolderById(FOLDER_ID), INBOX_NAME);
     fileId = inbox.createFile(blob).getId();
-  } catch (e2) { status = 'ERR'; err = String(e2).slice(0, 200); }
+  } catch (e2) {
+    status = 'ERR'; err = String(e2).slice(0, 200);
+    alertAdmins_(ss, '⚠️ รับไฟล์จาก LINE ไม่สำเร็จ จาก ' + (src.name || 'ไม่ทราบแหล่ง') + ' เมื่อ ' + when.slice(5, 16) + '\nไฟล์นี้ไม่ได้ถูกเก็บ ต้องให้ส่งใหม่หรือดาวน์โหลดเอง\n(' + err.slice(0, 80) + ')', 'dl_' + sourceId_(ev));
+  }
   /* คอลัมน์ 20 = โหมด|เวลารับ(ms)|replyToken — เก็บชั่วคราวให้ ackCollect_ รวมตอบทีเดียว แล้วล้างทิ้ง */
   const pend = src.ack && ev.replyToken ? src.ack + '|' + Date.now() + '|' + ev.replyToken : '';
   const qRow = withLock_(function () {
@@ -781,7 +786,9 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
       plan.push({ row: row, file: file, doc: doc, supplier: supplier, kind: kind, no: no, isDup: isDup, link: link, result: result, tries: tries, received: v[i][0] });
       out[row] = { status: 'DONE', kind: kind, supplierName: SUPPLIERS[supplier].name, no: no, total: num_(doc.total), result: result };
     } catch (err) {
-      plan.push({ row: row, err: String(err).slice(0, 200), tries: tries });
+      /* เพดาน Gemini เต็ม/ระบบไม่ว่าง (429, 503): ไม่นับเป็นความผิดพลาดของเอกสาร ลองใหม่รอบถัดไปได้เรื่อย ๆ */
+      const busy = /Gemini (429|503)/.test(String(err));
+      plan.push({ row: row, err: String(err).slice(0, 200), tries: busy ? tries - 1 : tries, source: v[i][1], received: v[i][0], fileId: v[i][6] });
       out[row] = { status: 'ERR' };
     }
   });
@@ -800,6 +807,14 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
     } catch (err) { console.error('store row ' + p.row + ' ' + err); }
   });
   writeBills_(ss, bills);
+
+  /* อ่านไม่ผ่านครบ MAX_TRIES → แจ้งคนทางแชทส่วนตัว ข้อความเดียวต่อรอบ */
+  const dead = plan.filter(function (p) { return p.err && p.tries >= MAX_TRIES; });
+  if (dead.length) {
+    const from = dead.map(function (p) { return p.source; }).filter(function (x, k, a) { return x && a.indexOf(x) === k; }).join(', ');
+    alertAdmins_(ss, '⚠️ อ่านเอกสารไม่ได้ ' + dead.length + ' ไฟล์ จาก ' + (from || '-') + '\nส่งเมื่อ ' + String(dead[0].received).slice(5, 16) +
+      '\nไฟล์ยังอยู่ใน Drive แต่ยังไม่ได้ลงทะเบียน:\n' + dead.slice(0, 5).map(function (p) { return 'https://drive.google.com/file/d/' + p.fileId + '/view'; }).join('\n'));
+  }
   return out;
 }
 
@@ -851,6 +866,20 @@ function draftRrlSummary_(ss, today) {
   let out = 'ยอดเดือน ' + mm + '\n' + (d.lines || []).join('\n');
   if ((d.unsure || []).length) out += '\n\n(บอทไม่แน่ใจ: ' + d.unsure.join(' / ') + ')';
   return out;
+}
+
+/* แจ้งเตือนเรื่องที่คนต้องรู้ → push เข้าแชทส่วนตัวของคนที่ติ๊ก "รับแจ้งเตือน" ในแท็บ บอท-ตั้งค่า (ไม่ส่งเข้ากลุ่มเด็ดขาด)
+ * นับโควต้า 1 ข้อความต่อผู้รับ → รวมหลายไฟล์เป็นข้อความเดียว และ throttleKey กันส่งเรื่องเดิมรัว ๆ (10 นาที) */
+function alertAdmins_(ss, text, throttleKey) {
+  try {
+    if (throttleKey) {
+      const cache = CacheService.getScriptCache();
+      if (cache.get('alert_' + throttleKey)) return;
+      cache.put('alert_' + throttleKey, '1', 600);
+    }
+    const cfg = readCfg_(ss);
+    for (const id in cfg) if (cfg[id].alert && cfg[id].type === 'user') { try { pushText_(id, text); } catch (e) { console.error('alert ' + e); } }
+  } catch (err) { console.error('alertAdmins ' + err); }
 }
 
 /* push ได้เฉพาะ userId (แชท 1:1) — ห้ามส่งเข้ากลุ่ม */
