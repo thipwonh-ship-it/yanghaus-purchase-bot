@@ -132,6 +132,38 @@ function addPayment_(bill, ref, date, amount) {
   return true;
 }
 
+/* เลขเอกสารเจสตาร์ที่ถูกรูปแบบ: IV + 9 หลัก (สนญ.) หรือ IV + รหัสสาขา 2 หลัก + 9 หลัก */
+function jstarNoOk_(no) { return /^IV(\d{2})?\d{9}$/.test(String(no || '')); }
+function editDist_(a, b) {
+  a = String(a); b = String(b);
+  let prev = []; for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+/* หาใบส่งสินค้าเจสตาร์ที่ใบกำกับนี้อ้างถึง → { bill, how, note } (bill = null คือไม่พบ ให้ผู้เรียกสร้างบิลใหม่)
+ * 1) เลขอ้างอิงตรง และบิลยังไม่มีใบกำกับเลขอื่น และ (ยอดตรง หรือ ไม่มีบิลอื่นที่ยอดตรงกว่า)
+ * 2) เลขใกล้เคียง (ผิดไม่เกิน 2 ตัว) + ยอดตรง + มีใบเดียว → จับคู่ ไม่ต้องตรวจ
+ * 3) ยอดตรง + วันที่ห่างไม่เกิน 4 วัน + มีใบเดียว → จับคู่ แต่ขึ้นรอตรวจ */
+function matchJstarBill_(bills, ref, total, date, invNo) {
+  const open = bills.filter(function (b) {
+    return b.supplier === 'JSTAR' && b.key.indexOf('JSTAR|INV|') !== 0 && b.status !== 'ยกเลิก' && (!b.invNo || b.invNo === invNo) && sameAmt_(b.amount, total);
+  });
+  const near = open.filter(function (b) { return editDist_(b.no, ref) <= 2; });
+  const byDate = open.filter(function (b) { return !b.date || !date || Math.abs(daysBetween_(b.date, date)) <= 4; });
+  const exact = findBill_(bills, 'JSTAR|' + ref);
+  if (exact && (!exact.invNo || exact.invNo === invNo)) {
+    if (!exact.amount || sameAmt_(exact.amount, total)) return { bill: exact, how: '', note: '' };
+    if (byDate.length !== 1) return { bill: exact, how: '', note: '' };          // ยอดไม่ตรงและไม่มีตัวเลือกที่ดีกว่า → setInvoice_ จะขึ้นหมายเหตุยอดไม่ตรงเอง
+  }
+  if (near.length === 1) return { bill: near[0], how: near[0].no === ref ? '' : 'เลขใกล้เคียง', note: '' };
+  if (byDate.length === 1) return { bill: byDate[0], how: 'จากยอด', note: 'จับคู่จากยอด+วันที่ (เลขอ้างอิงบนใบกำกับอ่านได้ ' + ref + ') ตรวจเลขอีกครั้ง' };
+  return { bill: null, how: '', note: '' };
+}
+
 /* ใส่เอกสาร 1 ใบลงทะเบียนบิล — คืนข้อความผลจับคู่ (bills ถูกแก้ในที่) */
 function applyDoc_(bills, doc, supplier, link) {
   const kind = docKind_(doc);
@@ -182,11 +214,18 @@ function applyDoc_(bills, doc, supplier, link) {
         b.no = '(ไม่อ้างบิล)'; b.date = date; setInvoice_(b, doc, link); addNote_(b, 'ใบกำกับไม่อ้างเลขใบส่งสินค้า');
         return 'รอตรวจ: ใบกำกับ ' + no + ' ไม่อ้างเลขบิล';
       }
-      const existed = !!findBill_(bills, 'JSTAR|' + ref);
-      const b = getBill_(bills, 'JSTAR|' + ref, 'JSTAR');
-      b.no = ref; b.date = b.date || date;
+      /* รูปถ่ายในแชทอ่านเลขผิดได้ทั้งเลขใบกำกับและเลขอ้างอิง → ไม่เชื่อเลขอย่างเดียว ใช้ยอด + วันที่ช่วยยืนยัน (ดู matchJstarBill_) */
+      const m = matchJstarBill_(bills, ref, total, date, no);
+      const b = m.bill || getBill_(bills, 'JSTAR|' + ref, 'JSTAR');
+      b._dirty = true;
+      if (!m.bill) { b.no = ref; if (!jstarNoOk_(ref)) addNote_(b, 'เลขอ้างอิง ' + ref + ' ไม่ครบหลัก อาจอ่านผิด'); }
+      b.date = b.date || date;
+      const twin = bills.filter(function (x) { return x !== b && x.supplier === 'JSTAR' && x.invNo === no; })[0];
       setInvoice_(b, doc, link);
-      return (existed ? 'จับคู่บิล ' : 'ใบกำกับมาก่อนบิล ') + ref;
+      if (twin) addNote_(b, 'เลขใบกำกับ ' + no + ' ซ้ำกับบิล ' + twin.no + ' อาจอ่านเลขผิด');
+      if (!jstarNoOk_(no)) addNote_(b, 'เลขใบกำกับ ' + no + ' ไม่ครบหลัก อาจอ่านผิด');
+      if (m.note) addNote_(b, m.note);
+      return (m.bill ? 'จับคู่บิล ' + b.no + (m.how ? ' (' + m.how + ')' : '') : 'ใบกำกับมาก่อนบิล ' + ref);
     }
     return 'เก็บไฟล์ (' + kind + ')';
   }

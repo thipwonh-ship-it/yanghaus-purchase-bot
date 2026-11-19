@@ -3,7 +3,7 @@ const fs = require('fs'), vm = require('vm'), path = require('path');
 const code = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
 const ctx = { console };
 vm.createContext(ctx);
-vm.runInContext(code + '\nthis.T={normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_,ackSummary_,ackMode_};', ctx);
+vm.runInContext(code + '\nthis.T={normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_,ackSummary_,ackMode_,editDist_};', ctx);
 const T = ctx.T;
 let fail = 0;
 const eq = (a, b, m) => { const ok = JSON.stringify(a) === JSON.stringify(b); if (!ok) { fail++; console.log('FAIL', m, '\n  got ', JSON.stringify(a), '\n  want', JSON.stringify(b)); } else console.log('ok  ', m); };
@@ -120,6 +120,29 @@ eq(T.ackSummary_([AK('transfer_slip', 'X'), { status: 'SKIP' }, { status: 'ERR' 
   '✅ เก็บสลิปโอนแล้ว: X\nℹ️ ไม่ใช่เอกสาร 1 ไฟล์ (ไม่ได้เก็บ)\n📥 อีก 1 ไฟล์รับแล้ว กำลังอ่านต่อ (ไม่แจ้งซ้ำ)', 'ตอบรับทุกไฟล์');
 eq([T.ackMode_('ไม่ตอบ'), T.ackMode_(''), T.ackMode_('เฉพาะเอกสารสำคัญ'), T.ackMode_('ทุกไฟล์'), T.ackMode_(true)], ['', '', 'key', 'all', 'all'], 'โหมดตอบรับ');
 eq([T.normDocNo_('IV69110013S'), T.normDocNo_('IVO1691100119'), T.normDocNo_('IVCM691100006'), T.normDocNo_('HS6911-06002')], ['IV691100135', 'IV01691100119', 'IVCM691100006', 'HS6911-06002'], 'เลขเอกสาร: แก้ OCR S→5 เฉพาะเลขเจสตาร์');
+
+{
+/* เจสตาร์: รูปในแชทอ่านเลขผิด → จับคู่ด้วยเลขใกล้เคียง/ยอด (เคสจริง 19 พ.ย.) */
+const fz = [];
+const fdn = (no, date, total) => T.applyDoc_(fz, { title: 'ใบส่งสินค้า', doc_type: 'delivery_note', doc_no: no, doc_date: date, total: total, vat: 0, customer_code: 'C-P124' }, 'JSTAR', '');
+const fiv = (no, date, ref, total) => T.applyDoc_(fz, { title: 'ใบส่งสินค้า/ใบกำกับภาษี', doc_type: 'tax_invoice', doc_no: no, doc_date: date, ref_no: ref, total: total, vat: 1 }, 'JSTAR', 'L');
+fdn('IV01691100079', '2026-11-08', 6400); fdn('IV08691100059', '2026-11-08', 9350); fdn('IV10691100050', '2026-11-08', 8500);
+fdn('IV691100135', '2026-11-10', 60625); fdn('IV691100211', '2026-11-13', 24600);
+const fbill = no => fz.filter(b => b.no === no)[0];
+fiv('IV691100082', '2026-11-08', 'IV691100079', 6400);
+eq([fbill('IV01691100079').invNo, fbill('IV01691100079').review], ['IV691100082', ''], 'เลขอ้างอิงตกรหัสสาขา 2 หลัก + ยอดตรง → จับคู่ ไม่ต้องตรวจ');
+fiv('IV691100083', '2026-11-08', 'IV691100079', 9350);
+eq([fbill('IV08691100059').invNo, /จับคู่จากยอด/.test(fbill('IV08691100059').review), fbill('IV01691100079').review], ['IV691100083', true, ''], 'เลขอ้างอิงผิดทั้งเลข → จับจากยอด+วันที่ ขึ้นรอตรวจ ไม่ไปทับบิลอื่น');
+fiv('IV691100085', '2026-11-08', 'IV1069110050', 8500.01);
+eq([fbill('IV10691100050').invNo, fbill('IV10691100050').review], ['IV691100085', ''], 'เลขอ้างอิงตก 0 หนึ่งตัว → จับคู่');
+fiv('IV69110013S', '2026-11-13', 'IV69110021', 24600);
+eq([fbill('IV691100211').invNo, fbill('IV691100211').review], ['IV691100135', ''], 'เลขอ้างอิงขาด 1 หลัก + เลขใบกำกับ S→5');
+fiv('IV691100100', '2026-11-10', 'IV691100135', 54425);
+eq([fbill('IV691100135').invNo, /ไม่ตรงยอดบิล/.test(fbill('IV691100135').review)], ['IV691100100', true], 'เลขตรงแต่ยอดไม่ตรง → จับคู่ + รอตรวจยอด');
+eq(fz.length, 5, 'ไม่มีบิลผีเกิดจากเลขที่อ่านผิด');
+fiv('IV691100082', '2026-11-09', 'IV07691100999', 1234);
+eq(/ซ้ำกับบิล/.test(fbill('IV07691100999').review), true, 'เลขใบกำกับซ้ำกับบิลอื่น → รอตรวจ');
+}
 
 console.log(fail ? '\n' + fail + ' รายการไม่ผ่าน' : '\nผ่านทั้งหมด');
 process.exit(fail ? 1 : 0);
