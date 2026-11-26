@@ -94,6 +94,19 @@ function normDate_(s) {
   if (y < 2000 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return '';
   return y + '-' + ('0' + m).slice(-2) + '-' + ('0' + d).slice(-2);
 }
+/* ตัวกันปีผิด: AI อ่านวัน/เดือนถูกแต่ปีพลาด (เช่น 2025 แทน 2026) → วันที่เก่ากว่าวันรับไฟล์เกิน 180 วัน หรือเกินวันรับ 1 วัน
+ * ลองใช้ปีของวันรับ (ถ้าได้วันอนาคตใช้ปีก่อนหน้า) ถ้าผลอยู่ในช่วง 180 วันก่อนวันรับ ถึงวันรับ+1 ใช้ค่านั้น ไม่งั้นคืนค่าเดิม */
+function fixYear_(ymd, recv) {
+  if (!ymd || !recv) return ymd;
+  const ok = function (x) { const d = daysBetween_(recv, x); return d >= -180 && d <= 1; };
+  if (ok(ymd)) return ymd;
+  const ry = +recv.slice(0, 4), md = ymd.slice(4);
+  for (const y of [ry, ry - 1]) {
+    const c = normDate_(y + md);
+    if (c && c.slice(4) === md && ok(c)) return c;
+  }
+  return ymd;
+}
 function addNote_(bill, note) {
   const cur = String(bill.review || '');
   if (cur.indexOf(note) < 0) bill.review = cur ? cur + ' · ' + note : note;
@@ -391,8 +404,8 @@ function buildFollowups_(bills, today, lastJstarReport) {
 
   /* ---- รุ่งเรือง: สรุปยอดวันสิ้นเดือน · ใบกำกับออกเดือนถัดไป ลงวันที่เดือนถัดไป (เป็นภาษีซื้อของเดือนถัดไป ไม่นับว่าข้ามเดือน) ---- */
   const prevYm = prevYm_(thisYm);
-  if (day === last) {
-    push('RRL', 'สรุปยอดสิ้นเดือน', 'วันนี้สิ้นเดือน: คุณอ้อยตรวจร่างสรุป → วางในกลุ่ม → ขอยอด → โอน (ใบกำกับรุ่งเรืองจะออกเดือนถัดไป ลงวันที่เดือนถัดไป)', '');
+  if (day === 1) {
+    push('RRL', 'สรุปยอดเดือนก่อน', 'ร่างสรุปยอดรุ่งเรืองเดือน ' + prevYm + ' พร้อมแล้ว: คุณอ้อยตรวจ → วางในกลุ่ม → ขอยอด → โอน (ใบกำกับจะลงวันที่เดือนนี้)', '');
   }
   if (day <= 10 && day % 2 === 0) {
     const m = findBill_(bills, 'RRL|' + prevYm);
@@ -846,10 +859,16 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
       const file = files[k] || DriveApp.getFileById(v[i][6]);
       const doc = pre[k] || readDoc_(file) || {};
       if (!doc.is_document) { plan.push({ row: row, file: file, skip: true }); out[row] = { status: 'SKIP' }; return; }
-      doc.doc_date = normDate_(doc.doc_date);
-      if (Array.isArray(doc.lines)) doc.lines.forEach(function (l) { if (l) l.doc_date = normDate_(l.doc_date); });
-      /* วันที่อนาคต (เกินวันรับ 1 วัน) = อ่านผิดแน่ → ไม่ใช้จัดโฟลเดอร์/จับคู่ */
       const recv = String(v[i][0]).slice(0, 10);
+      const yearFix = [];
+      const cleanDate = function (raw) {
+        const d0 = normDate_(raw), d1 = fixYear_(d0, recv);
+        if (d1 !== d0 && yearFix.indexOf(d0.slice(0, 4) + '→' + d1.slice(0, 4)) < 0) yearFix.push(d0.slice(0, 4) + '→' + d1.slice(0, 4));
+        return d1;
+      };
+      doc.doc_date = cleanDate(doc.doc_date);
+      if (Array.isArray(doc.lines)) doc.lines.forEach(function (l) { if (l) l.doc_date = cleanDate(l.doc_date); });
+      /* วันที่อนาคต (เกินวันรับ 1 วัน) ที่แก้ปีไม่ได้ = อ่านผิดแน่ → ไม่ใช้จัดโฟลเดอร์/จับคู่ */
       const badDate = !!(doc.doc_date && recv && daysBetween_(recv, doc.doc_date) > 1);
       if (badDate) doc.doc_date = '';
       let supplier = String(v[i][2] || '').toUpperCase();
@@ -877,6 +896,7 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
         if (kind === 'platform_order' && doc.items) result = 'ออเดอร์: ' + String(doc.items).slice(0, 300);
         if (copy) { result += ' · สำเนา'; bills.forEach(function (b) { if (b.supplier === supplier && b.invNo === no) { addNote_(b, COPY_NOTE); b._dirty = true; } }); }
       }
+      if (yearFix.length) result += ' · แก้ปีที่อ่านผิด ' + yearFix.join(', ');
       const pl = { row: row, file: file, doc: doc, supplier: supplier, kind: kind, no: no, isDup: isDup, link: link, result: result, tries: tries, received: v[i][0] };
       if (no && !isDup) seen[dupKey] = { copy: copy, link: link, plan: pl, total: num_(doc.total) };
       if (hit && !prev) { result += ' · เลขซ้ำกับเอกสารอื่นแต่ยอดต่าง ตรวจเลข'; pl.result = result; }
@@ -923,7 +943,7 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
 }
 
 /* =====================================================================
- * ส่วนที่ 4 — งานรายวัน 08:30: เขียนแท็บ ตามใบกำกับ ให้ "สรุปเช้า" (09:22) อ่าน + ร่างสรุปรุ่งเรืองวันสิ้นเดือน
+ * ส่วนที่ 4 — งานรายวัน 08:30: เขียนแท็บ ตามใบกำกับ ให้ "สรุปเช้า" (09:22) อ่าน + ร่างสรุปรุ่งเรืองวันที่ 1 (ยอดเดือนก่อน)
  * ===================================================================== */
 function dailyJob() {
   const ss = ss_();
@@ -936,13 +956,13 @@ function dailyJob() {
   const stuck = q.filter(function (r) { return r[7] === 'ERR'; }).length;
   if (stuck) rows.push([today, 'ระบบ', 'อ่านไม่ได้', 'มีเอกสาร ' + stuck + ' ไฟล์ที่บอทอ่านไม่สำเร็จ ดูแท็บ บอท-คิว (สถานะ ERR)', '']);
 
-  const day = +today.slice(8, 10), last = lastDay_(today);
-  if (day === last) {
+  const day = +today.slice(8, 10);
+  if (day === 1) {
     try {
       const draft = draftRrlSummary_(ss, today);
-      rows.push([today, SUPPLIERS.RRL.name, 'ร่างสรุปยอด', 'ร่างจากข้อความในกลุ่มวันที่ 1 ถึงเช้านี้ (คุณอ้อยต้องตรวจและเติมรายการของวันนี้ก่อนส่ง)', draft]);
+      rows.push([today, SUPPLIERS.RRL.name, 'ร่างสรุปยอด', 'ร่างจากข้อความในกลุ่มทั้งเดือน ' + prevYm_(ym_(today)) + ' (คุณอ้อยต้องตรวจก่อนส่ง)', draft]);
       const oi = prop_('OI_USER_ID');
-      if (oi && draft) pushText_(oi, 'ร่างสรุปยอดรุ่งเรืองเดือนนี้ ถึงเช้าวันนี้ (ตรวจ เติมรายการของวันนี้ถ้ามี แล้วคัดลอกไปวางในกลุ่มได้เลยค่ะ)\n\n' + draft);
+      if (oi && draft) pushText_(oi, 'ร่างสรุปยอดรุ่งเรืองเดือนที่แล้ว (ตรวจแล้วคัดลอกไปวางในกลุ่มได้เลยค่ะ)\n\n' + draft);
     } catch (err) { rows.push([today, SUPPLIERS.RRL.name, 'ร่างสรุปยอด', 'ร่างไม่สำเร็จ: ' + String(err).slice(0, 120), '']); }
   }
 
@@ -952,18 +972,18 @@ function dailyJob() {
   sh.getRange('G1:H1').setValues([['อัปเดตล่าสุด', now_()]]);
 }
 
-/* ร่างสรุปยอดรุ่งเรือง: ข้อความในกลุ่มตั้งแต่วันที่ 1 ของเดือน ถึงวันนี้ (วันสิ้นเดือน) → รูปแบบที่คุณอ้อยพิมพ์เอง */
+/* ร่างสรุปยอดรุ่งเรือง (รันวันที่ 1): ข้อความในกลุ่มทั้งเดือนก่อน → รูปแบบที่คุณอ้อยพิมพ์เอง */
 function draftRrlSummary_(ss, today) {
   const v = ss.getSheetByName(TAB_TEXT).getDataRange().getDisplayValues();
-  const prevCut = monthEnd_(prevYm_(ym_(today)));                                      // วันสุดท้ายของเดือนก่อน
+  const ym = prevYm_(ym_(today)), from = ym + '-01', to = monthEnd_(ym);                 // ทั้งเดือนก่อน
   const lines = [];
-  for (let i = 1; i < v.length; i++) if (v[i][2] === 'RRL' && v[i][0].slice(0, 10) > prevCut && v[i][0].slice(0, 10) <= today) lines.push(v[i][0] + ' | ' + v[i][3].slice(-6) + ' | ' + v[i][4]);
+  for (let i = 1; i < v.length; i++) if (v[i][2] === 'RRL' && v[i][0].slice(0, 10) >= from && v[i][0].slice(0, 10) <= to) lines.push(v[i][0] + ' | ' + v[i][3].slice(-6) + ' | ' + v[i][4]);
   /* ใบออเดอร์ Shopee/TikTok ที่ส่งเป็นรูป/PDF ในกลุ่ม = คำสั่งให้ซัพพลายเออร์ส่งของให้ลูกค้า → นับเป็นรายการสั่งด้วย */
   const q = ss.getSheetByName(TAB_QUEUE).getDataRange().getDisplayValues();
   for (let i = 1; i < q.length; i++) {
     if (q[i][2] !== 'RRL' || q[i][7] !== 'DONE' || q[i][8] !== 'platform_order' || !/^ออเดอร์: /.test(q[i][15])) continue;
     const d0 = q[i][0].slice(0, 10);
-    if (d0 > prevCut && d0 <= today) lines.push(q[i][0] + ' | ORDER-SHEET ' + q[i][10] + ' | ' + q[i][15].replace(/^ออเดอร์: /, ''));
+    if (d0 >= from && d0 <= to) lines.push(q[i][0] + ' | ORDER-SHEET ' + q[i][10] + ' | ' + q[i][15].replace(/^ออเดอร์: /, ''));
   }
   lines.sort();
   if (!lines.length) return '';
@@ -975,7 +995,7 @@ function draftRrlSummary_(ss, today) {
     'using Thai Buddhist 2-digit year (2026 → 69), e.g. "6/11/69 ฟอเท็ก 265/60-18 4เส้น". Keep product wording as the buyer wrote it. ' +
     'On ORDER-SHEET lines the printed quantity counts listing units: for wheels 1 = 1 วง, unless the product name or option says it is a set (e.g. ชุด 4 วง, 4 ชิ้น, set of 4) — then write the real piece count (sets × pieces per set).\n\n' + lines.join('\n');
   const d = geminiJson_([{ text: prompt }]);
-  const mm = +today.slice(5, 7);
+  const mm = +ym.slice(5, 7);
   let out = 'ยอดเดือน ' + mm + '\n' + (d.lines || []).join('\n');
   if ((d.unsure || []).length) out += '\n\n(บอทไม่แน่ใจ: ' + d.unsure.join(' / ') + ')';
   return out;

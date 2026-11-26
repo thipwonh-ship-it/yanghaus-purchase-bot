@@ -3,7 +3,7 @@ const fs = require('fs'), vm = require('vm'), path = require('path');
 const code = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
 const ctx = { console };
 vm.createContext(ctx);
-vm.runInContext(code + '\nthis.T={normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_,ackSummary_,ackMode_,editDist_,docKind_,isCopy_,normDate_};', ctx);
+vm.runInContext(code + '\nthis.T={fixYear_,normDocNo_,applyDoc_,buildFollowups_,billStatus_,docKind_,detectSupplier_,lastDay_,num_,ackSummary_,ackMode_,editDist_,docKind_,isCopy_,normDate_};', ctx);
 const T = ctx.T;
 let fail = 0;
 const eq = (a, b, m) => { const ok = JSON.stringify(a) === JSON.stringify(b); if (!ok) { fail++; console.log('FAIL', m, '\n  got ', JSON.stringify(a), '\n  want', JSON.stringify(b)); } else console.log('ok  ', m); };
@@ -81,8 +81,10 @@ dn('IV691100400', '2026-11-28', 5000);
 eq(types('2026-11-28', '2026-11-25'), ['เจสตาร์:เสี่ยงข้ามเดือน'], '28 พ.ย. บิลปลายเดือนเสี่ยงข้ามเดือน (รุ่งเรืองไม่มีรายการก่อนสิ้นเดือน)');
 eq(types('2026-11-27', '2026-11-25'), [], '27 พ.ย. ไม่ใช่วันตัดยอดรุ่งเรืองแล้ว');
 eq(T.buildFollowups_([], '2026-12-28', '2026-12-26').map(r => r[2]), [], '28 ธ.ค. ไม่ใช่วันตัดยอดรุ่งเรืองแล้ว');
-eq(T.buildFollowups_([], '2026-12-31', '2026-12-26').map(r => r[2]), ['สรุปยอดสิ้นเดือน'], '31 ธ.ค. รุ่งเรืองสรุปยอดวันสิ้นเดือน');
-eq(types('2026-11-30', '2026-11-25'), ['เจสตาร์:ทวง (สิ้นเดือน)', 'เจสตาร์:เสี่ยงข้ามเดือน', 'รุ่งเรือง:สรุปยอดสิ้นเดือน'], '30 พ.ย. ทวงสิ้นเดือน + รุ่งเรืองสรุปยอด');
+eq(T.buildFollowups_([], '2026-12-31', '2026-12-26').map(r => r[2]), [], '31 ธ.ค. ไม่มีรายการรุ่งเรือง (ร่างออกวันที่ 1)');
+eq(T.buildFollowups_([], '2027-01-01', '').map(r => r[2]), ['สรุปยอดเดือนก่อน'], '1 ม.ค. ร่างสรุปยอดรุ่งเรืองเดือน ธ.ค.');
+eq(/2026-12/.test(T.buildFollowups_([], '2027-01-01', '')[0][3]), true, '1 ม.ค. อ้างยอดเดือน 2026-12');
+eq(types('2026-11-30', '2026-11-25'), ['เจสตาร์:ทวง (สิ้นเดือน)', 'เจสตาร์:เสี่ยงข้ามเดือน'], '30 พ.ย. ทวงสิ้นเดือน');
 eq(T.buildFollowups_([], '2026-12-02', '').map(r => r[2]), ['ยังไม่โอน'], '2 ธ.ค. รุ่งเรืองยอด พ.ย. ยังไม่โอน');
 eq(T.buildFollowups_([], '2026-12-03', '').map(r => r[2]), [], '3 ธ.ค. (วันคี่) ไม่เตือนซ้ำ');
 eq(T.buildFollowups_([], '2026-12-12', '').map(r => r[2]), [], '12 ธ.ค. เลิกเตือนยังไม่โอน');
@@ -200,6 +202,12 @@ eq(T.docKind_({ title: 'ใบเสร็จรับเงิน e-slip', doc_
   T.applyDoc_(rr, { title: 'โอนเงินสำเร็จ', doc_type: 'transfer_slip', doc_no: '', doc_date: '2026-11-28', total: 2000, vat: 0 }, 'RRL', '');
   eq(rr[0].paid, 3000, 'รุ่งเรือง: สลิป 2 ใบที่อ่านเลขอ้างอิงไม่ได้ นับครบทั้งสองใบ');
 }
+
+// ---- ตัวกันปีผิด ----
+eq([T.fixYear_('2025-11-21', '2026-11-21'), T.fixYear_('2027-11-21', '2026-11-26'), T.fixYear_('2026-11-20', '2026-11-26'),
+    T.fixYear_('2026-12-28', '2027-01-03'), T.fixYear_('2027-12-28', '2027-01-03'), T.fixYear_('2025-03-10', '2026-11-26'), T.fixYear_('', '2026-11-26')],
+   ['2026-11-21', '2026-11-21', '2026-11-20', '2026-12-28', '2026-12-28', '2025-03-10', ''],
+   'ปีผิด: 2025→2026 · ปีอนาคต→ปีนี้ · ปกติไม่แตะ · ข้ามปีใหม่ใช้ปีก่อน · แก้แล้วยังไม่สมเหตุผล = คืนค่าเดิม');
 
 console.log(fail ? '\n' + fail + ' รายการไม่ผ่าน' : '\nผ่านทั้งหมด');
 process.exit(fail ? 1 : 0);
