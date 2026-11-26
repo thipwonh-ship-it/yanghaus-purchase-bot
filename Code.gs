@@ -72,6 +72,17 @@ function daysBetween_(a, b) { return Math.round((ymdToUtc_(b) - ymdToUtc_(a)) / 
 function lastDay_(ymd) { const m = /^(\d{4})-(\d{2})/.exec(ymd); return new Date(Date.UTC(+m[1], +m[2], 0)).getUTCDate(); }
 function dow_(ymd) { return new Date(ymdToUtc_(ymd)).getUTCDay(); }           // 0 = อาทิตย์, 1 = จันทร์
 function ym_(ymd) { return String(ymd || '').slice(0, 7); }
+function prevYm_(ym) { const y = +String(ym).slice(0, 4), m = +String(ym).slice(5, 7); return m === 1 ? (y - 1) + '-12' : y + '-' + ('0' + (m - 1)).slice(-2); }
+/* รุ่งเรือง: สรุปยอดวันสิ้นเดือน แล้วโอนวันสิ้นเดือนหรือต้นเดือนถัดไป → สลิปวันที่ 1-10 เป็นยอดของเดือนก่อน
+ * เว้นแต่เดือนก่อนเคลียร์ไปแล้วตั้งแต่ก่อนขึ้นเดือนนี้ */
+function rrlYm_(bills, date) {
+  const ym = ym_(date);
+  if (+String(date).slice(8, 10) > 10) return ym;
+  const pb = findBill_(bills, 'RRL|' + prevYm_(ym));
+  if (pb && num_(pb.paid) && ym_(pb.payDate) !== ym) return ym;
+  return prevYm_(ym);
+}
+function monthEnd_(ym) { return ym + '-' + ('0' + lastDay_(ym + '-01')).slice(-2); }
 /* วันที่จาก AI → YYYY-MM-DD ค.ศ. เสมอ: รับ 2569-11-18 (ลืมแปลง พ.ศ.), 18/11/2569, 18/11/69 · อ่านไม่ออก = '' */
 function normDate_(s) {
   const t = String(s == null ? '' : s).trim();
@@ -131,7 +142,7 @@ function getBill_(bills, key, supplier) {
 function billStatus_(b) {
   if (b.review) return 'รอตรวจ';
   if (!b.invNo) return 'รอใบกำกับ';
-  if (b.date && b.invDate && ym_(b.date) !== ym_(b.invDate)) return b.original ? 'ครบ (ใบกำกับข้ามเดือน)' : 'รอตัวจริง (ใบกำกับข้ามเดือน)';
+  if (b.supplier !== 'RRL' && b.date && b.invDate && ym_(b.date) !== ym_(b.invDate)) return b.original ? 'ครบ (ใบกำกับข้ามเดือน)' : 'รอตัวจริง (ใบกำกับข้ามเดือน)';
   return b.original ? 'ครบ' : 'รอตัวจริง';
 }
 function setInvoice_(bill, doc, link) {
@@ -303,8 +314,9 @@ function applyDoc_(bills, doc, supplier, link) {
 
   if (supplier === 'RRL') {
     if (kind === 'transfer_slip') {
-      const b = getBill_(bills, 'RRL|' + ym_(date), 'RRL');
-      b.no = 'ยอดเดือน ' + ym_(date); b.date = b.date || date; b.amount = b.amount || total;
+      const m = rrlYm_(bills, date);
+      const b = getBill_(bills, 'RRL|' + m, 'RRL');
+      b.no = 'ยอดเดือน ' + m; b.date = b.date || (ym_(date) === m ? date : monthEnd_(m)); b.amount = b.amount || total;
       addPayment_(b, payRef, date, total);
       return 'จ่ายรุ่งเรือง ' + fmtMoney_(total);
     }
@@ -315,10 +327,12 @@ function applyDoc_(bills, doc, supplier, link) {
       const paidOpen = bills.filter(function (b) { return b.supplier === 'RRL' && !b.invNo && num_(b.paid); })
         .sort(function (a, b) { return String(b.payDate).localeCompare(String(a.payDate)); });
       const cand = paidOpen.filter(function (b) { return sameAmt_(b.paid, total); })[0] || paidOpen[0];
-      const b = cand || getBill_(bills, 'RRL|' + ym_(date), 'RRL');
+      /* ใบกำกับรุ่งเรืองออกเดือนถัดไป ลงวันที่เดือนถัดไป → ใบลงวันที่เดือน M = ยอดซื้อเดือน M-1 */
+      const m = prevYm_(ym_(date));
+      const b = cand || getBill_(bills, 'RRL|' + m, 'RRL');
       b._dirty = true;
-      if (!cand && b.invNo) { addNote_(b, 'มีใบกำกับเดือนนี้มากกว่า 1 ใบ (' + no + ')'); return 'รอตรวจ: ใบกำกับรุ่งเรืองใบที่สอง'; }
-      b.no = b.no || 'ยอดเดือน ' + ym_(date); b.date = b.date || date;
+      if (!cand && b.invNo) { addNote_(b, 'มีใบกำกับของยอดเดือนนี้มากกว่า 1 ใบ (' + no + ')'); return 'รอตรวจ: ใบกำกับรุ่งเรืองใบที่สอง'; }
+      b.no = b.no || 'ยอดเดือน ' + m; b.date = b.date || monthEnd_(m);
       setInvoice_(b, doc, link);
       if (num_(b.paid) && !sameAmt_(b.paid, total)) addNote_(b, 'ยอดใบกำกับ ' + fmtMoney_(total) + ' ไม่ตรงยอดโอน ' + fmtMoney_(b.paid));
       return 'ใบกำกับรุ่งเรือง ' + no;
@@ -375,18 +389,20 @@ function buildFollowups_(bills, today, lastJstarReport) {
     }
   });
 
-  /* ---- รุ่งเรือง: วันตัดยอด = 3 วันก่อนสิ้นเดือน ---- */
-  if (day === last - 3) {
-    push('RRL', 'ตัดยอด', 'วันนี้วันตัดยอดรุ่งเรือง: คุณอ้อยตรวจร่างสรุป → วางในกลุ่ม → ขอยอด → โอนภายในเดือน', '');
+  /* ---- รุ่งเรือง: สรุปยอดวันสิ้นเดือน · ใบกำกับออกเดือนถัดไป ลงวันที่เดือนถัดไป (เป็นภาษีซื้อของเดือนถัดไป ไม่นับว่าข้ามเดือน) ---- */
+  const prevYm = prevYm_(thisYm);
+  if (day === last) {
+    push('RRL', 'สรุปยอดสิ้นเดือน', 'วันนี้สิ้นเดือน: คุณอ้อยตรวจร่างสรุป → วางในกลุ่ม → ขอยอด → โอน (ใบกำกับรุ่งเรืองจะออกเดือนถัดไป ลงวันที่เดือนถัดไป)', '');
   }
-  if (day > last - 3) {
-    const m = findBill_(bills, 'RRL|' + thisYm);
-    if (!m || !num_(m.paid)) push('RRL', 'ยังไม่โอน', 'เลยวันตัดยอดแล้ว ยังไม่มีสลิปโอนรุ่งเรืองของเดือนนี้ (โอนในเดือน = ใบกำกับลงวันที่ในเดือน)', '');
+  if (day <= 10 && day % 2 === 0) {
+    const m = findBill_(bills, 'RRL|' + prevYm);
+    if (!m || !num_(m.paid)) push('RRL', 'ยังไม่โอน', 'ยังไม่มีสลิปโอนรุ่งเรืองของยอดเดือน ' + prevYm + ' (ถ้าเดือนนั้นไม่มียอดซื้อ ข้ามได้)', '');
   }
 
   /* ---- ต้นเดือน: บิลเดือนก่อนที่ยังไม่มีใบกำกับ ---- */
   if (day <= 5) {
-    const prev = bills.filter(function (b) { return real(b) && !b.invNo && b.date && ym_(b.date) < thisYm; });
+    /* รุ่งเรืองของเดือนก่อน ใบกำกับจะลงวันที่เดือนนี้อยู่แล้ว → ไม่ต้องรอก่อนปิดยอดวันที่ 15 */
+    const prev = bills.filter(function (b) { return real(b) && !b.invNo && b.date && ym_(b.date) < thisYm && !(b.supplier === 'RRL' && ym_(b.date) === prevYm); });
     if (prev.length) push('OTHER', 'ค้างจากเดือนก่อน', 'บิลเดือนก่อนยังไม่มีใบกำกับ ' + prev.length + ' บิล ' + fmtMoney_(sum(prev)) + ' บาท (ต้องครบก่อนปิดยอดวันที่ 15)', listLines(prev));
   }
 
@@ -907,7 +923,7 @@ function processRows_(ss, onlyRows, deadline, afterRead) {
 }
 
 /* =====================================================================
- * ส่วนที่ 4 — งานรายวัน 08:30: เขียนแท็บ ตามใบกำกับ ให้ "สรุปเช้า" (09:22) อ่าน + ร่างสรุปรุ่งเรืองวันตัดยอด
+ * ส่วนที่ 4 — งานรายวัน 08:30: เขียนแท็บ ตามใบกำกับ ให้ "สรุปเช้า" (09:22) อ่าน + ร่างสรุปรุ่งเรืองวันสิ้นเดือน
  * ===================================================================== */
 function dailyJob() {
   const ss = ss_();
@@ -921,12 +937,12 @@ function dailyJob() {
   if (stuck) rows.push([today, 'ระบบ', 'อ่านไม่ได้', 'มีเอกสาร ' + stuck + ' ไฟล์ที่บอทอ่านไม่สำเร็จ ดูแท็บ บอท-คิว (สถานะ ERR)', '']);
 
   const day = +today.slice(8, 10), last = lastDay_(today);
-  if (day === last - 3) {
+  if (day === last) {
     try {
       const draft = draftRrlSummary_(ss, today);
-      rows.push([today, SUPPLIERS.RRL.name, 'ร่างสรุปยอด', 'ร่างจากข้อความในกลุ่ม (คุณอ้อยต้องตรวจก่อนส่ง)', draft]);
+      rows.push([today, SUPPLIERS.RRL.name, 'ร่างสรุปยอด', 'ร่างจากข้อความในกลุ่มวันที่ 1 ถึงเช้านี้ (คุณอ้อยต้องตรวจและเติมรายการของวันนี้ก่อนส่ง)', draft]);
       const oi = prop_('OI_USER_ID');
-      if (oi && draft) pushText_(oi, 'ร่างสรุปยอดรุ่งเรืองเดือนนี้ (ตรวจแล้วคัดลอกไปวางในกลุ่มได้เลยค่ะ)\n\n' + draft);
+      if (oi && draft) pushText_(oi, 'ร่างสรุปยอดรุ่งเรืองเดือนนี้ ถึงเช้าวันนี้ (ตรวจ เติมรายการของวันนี้ถ้ามี แล้วคัดลอกไปวางในกลุ่มได้เลยค่ะ)\n\n' + draft);
     } catch (err) { rows.push([today, SUPPLIERS.RRL.name, 'ร่างสรุปยอด', 'ร่างไม่สำเร็จ: ' + String(err).slice(0, 120), '']); }
   }
 
@@ -936,11 +952,10 @@ function dailyJob() {
   sh.getRange('G1:H1').setValues([['อัปเดตล่าสุด', now_()]]);
 }
 
-/* ร่างสรุปยอดรุ่งเรือง: ข้อความในกลุ่มตั้งแต่วันถัดจากวันตัดยอดเดือนก่อน ถึงวันนี้ → รูปแบบที่คุณอ้อยพิมพ์เอง */
+/* ร่างสรุปยอดรุ่งเรือง: ข้อความในกลุ่มตั้งแต่วันที่ 1 ของเดือน ถึงวันนี้ (วันสิ้นเดือน) → รูปแบบที่คุณอ้อยพิมพ์เอง */
 function draftRrlSummary_(ss, today) {
   const v = ss.getSheetByName(TAB_TEXT).getDataRange().getDisplayValues();
-  const prevEnd = new Date(ymdToUtc_(today.slice(0, 8) + '01') - 86400000);           // วันสุดท้ายของเดือนก่อน
-  const prevCut = Utilities.formatDate(new Date(prevEnd.getTime() - 3 * 86400000), 'UTC', 'yyyy-MM-dd');
+  const prevCut = monthEnd_(prevYm_(ym_(today)));                                      // วันสุดท้ายของเดือนก่อน
   const lines = [];
   for (let i = 1; i < v.length; i++) if (v[i][2] === 'RRL' && v[i][0].slice(0, 10) > prevCut && v[i][0].slice(0, 10) <= today) lines.push(v[i][0] + ' | ' + v[i][3].slice(-6) + ' | ' + v[i][4]);
   /* ใบออเดอร์ Shopee/TikTok ที่ส่งเป็นรูป/PDF ในกลุ่ม = คำสั่งให้ซัพพลายเออร์ส่งของให้ลูกค้า → นับเป็นรายการสั่งด้วย */
